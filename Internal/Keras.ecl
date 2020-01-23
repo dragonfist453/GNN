@@ -23,6 +23,9 @@ node := Thorlib.node();
   * <p>The Init(...) function initializes the global environment and defines
   * a frequently used set of functions so that they don't need to be replicated
   * and created on each individual embed.
+  * <p>Note that most functions receive a "seqId" parameter that is ignored by
+  * the function.  This is used to control the order of execution of ECL statements
+  * that call these functions.
   */
 EXPORT Keras := MODULE
   SHARED globalScope := 'keras_' + node + '.ecl';
@@ -49,14 +52,17 @@ EXPORT Keras := MODULE
         nodeId, nNodes, maxSliceLen = rec # Should only be one record
       # Initialize global variables
       global modcache
-      global tfHistory
-      tfHistory = None
+      modcache = {}
+      global nextModId
+      nextModId = 0
+      # The following 3 variables are for record keeping on each model.
+      # They are stored as a dictionary keyed by the model id.
       global currEpoch
-      currEpoch = 0
+      currEpoch = {}
       global batchCount
-      batchCount = 0
+      batchCount = {}
       global cumLoss
-      cumLoss = 0
+      cumLoss = {}
       global kStrTypeDict
       # kStrTypeDict needs to be kept in sync with Internal/Types.kStrType
       # The kString type is used for several different purposes, and the type
@@ -69,7 +75,6 @@ EXPORT Keras := MODULE
       dTypeDictR = {'float32':1, 'float64':2, 'int32':3, 'int64':4}
       # Store the element size for each tensor data type.
       dTypeSizeDict = {1:4, 2:8, 3:4, 4:8}
-      modcache = {}
       # Define some common functions
       global format_exc
       # format_exc is used to format an exception as a string so that we
@@ -212,15 +217,15 @@ EXPORT Keras := MODULE
     # Only define the globals once, no matter how many times Init gets called.
     # Use the model cache (modcache) as a flag to determine if we've already
     # initialized.
-    try:
-      mc = modcache
-    except:
+    #try:
+    #  mc = modcache
+    #except:
       # modcache doesn't exist.  Do the initialization.
-      try:
-        initGlobals()
-      except:
-        # We had an exception.  Format and return it.
-        return [(nodeId, 1,4,tb.format_exc('Init'))]
+    try:
+      initGlobals()
+    except:
+      # We had an exception.  Format and return it.
+      return [(nodeId, 1,4,tb.format_exc('Init'))]
     # Success.  Return blank status.
     return [(nodeId, 1, kStrTypeDict['status'], '')]
   ENDEMBED; // Init()
@@ -230,12 +235,13 @@ EXPORT Keras := MODULE
     * the kString record contains an error message.
     * DefineModel gets called on each node of the cluster.
     */
-  EXPORT STREAMED DATASET(kString) DefineModel(STREAMED DATASET(kString) mdef, UNSIGNED4 sess) :=
-              EMBED(Python: globalscope(globalScope), persist('query'), activity)
+  EXPORT STREAMED DATASET(kString) DefineModel(STREAMED DATASET(kString) mdef, UNSIGNED4 seqId)
+                      := EMBED(Python: globalscope(globalScope), persist('query'), activity)
     import traceback as tb
     import tensorflow as tf
     from tensorflow.keras import layers
     global tfSession
+    global nextModId
     try:
       # Restore the keras / tensorflow context.  It sometimes gets lost between calls,
       # so we explicitly restore it before each call that uses it.
@@ -256,13 +262,15 @@ EXPORT Keras := MODULE
             # compile string should be supplied.
             elif rectype == kStrTypeDict['compile']:
               exec('mod.' + rec[3])
-            modcache['default'] = mod
-          # For some reason we need to do a get_weights / set_weights here, or set_weights
-          # fails later???
-          w = mod.get_weights()
-          mod.set_weights(w)
+        modId = nextModId
+        nextModId += 1
+        modcache[modId] = mod
+        # For some reason we need to do a get_weights / set_weights here, or set_weights
+        # fails later???
+        w = mod.get_weights()
+        mod.set_weights(w)
         # We succeeded.  Return a blank status to indicate success.
-        return [(nodeId, 1, kStrTypeDict['status'], '')]
+        return [(nodeId, modId, kStrTypeDict['status'], '')]
     except:
       # We had an error.  Format the exception and return it in the kString
       return [(nodeId, 1, kStrTypeDict['status'], format_exc('DefineMod'))]
@@ -271,10 +279,11 @@ EXPORT Keras := MODULE
     * Return a JSON string representing the layers of the model.  Does not return any
     * compile information or trained weights.
     */
-  EXPORT STREAMED DATASET(kString) ToJSON(STREAMED DATASET(kString) dummy, UNSIGNED4 model) :=
+  EXPORT STREAMED DATASET(kString) ToJSON(STREAMED DATASET(kString) dummy, UNSIGNED4 seqId,
+                  UNSIGNED modelid = 0) :=
               EMBED(Python: globalscope(globalScope), persist('query'), activity)
     try:
-      mod = modcache['default']
+      mod = modcache[modelid]
       # Succeeded.  Return a blank status.
       return [(nodeId, 1, kStrTypeDict['status'], mod.to_json())]
     except:
@@ -284,9 +293,10 @@ EXPORT Keras := MODULE
   /**
     * Construct a Keras model from the JSON string passed in.
     */
-  EXPORT STREAMED DATASET(kString) FromJSON(STREAMED DATASET(kString) ksjson, UNSIGNED4 session) :=
-              EMBED(Python: globalscope(globalScope), persist('query'), activity)
+  EXPORT STREAMED DATASET(kString) FromJSON(STREAMED DATASET(kString) ksjson, UNSIGNED4 seqId)
+              := EMBED(Python: globalscope(globalScope), persist('query'), activity)
     import tensorflow as tf
+    global nextModId
     # Should be only one record on each node
     try:
       json = 'EMPTY'
@@ -294,21 +304,23 @@ EXPORT Keras := MODULE
         # Should only be one json kString record.
         json = rec[2]
       mod = tf.keras.models.model_from_json(json)
-      modcache['default'] = mod
+      modId = nextModId
+      nextModId += 1
+      modcache[modId] = mod
     except:
       # Error.  Return an exception string.
       return [(nodeId, 1, kStrTypeDict['status'], format_exc('FromJSON'))]
     # Success. Return an empty string.
-    return [(nodeId, 1, kStrTypeDict['status'], '')]
+    return [(nodeId, modId, kStrTypeDict['status'], '')]
   ENDEMBED;
   /**
     * Compile a previously defined model.
     */
-  EXPORT STREAMED DATASET(kString) CompileMod(STREAMED DATASET(kString) compilestr, UNSIGNED4 model) :=
-              EMBED(Python: globalscope(globalScope), persist('query'), activity)
+  EXPORT STREAMED DATASET(kString) CompileMod(STREAMED DATASET(kString) compilestr, UNSIGNED4 seqId,
+                UNSIGNED modelid = 0) := EMBED(Python: globalscope(globalScope), persist('query'), activity)
     import tensorflow as tf
     tf.keras.backend.set_session(tfSession)
-    mod = modcache['default']
+    mod = modcache[modelid]
     # Should only have one compilestr record per node
     try:
       cstr = 'EMPTY'
@@ -324,13 +336,13 @@ EXPORT Keras := MODULE
     * Weights are returned as a Tensor List.
     */
   EXPORT STREAMED DATASET(t_Tensor) GetWeights(
-                          STREAMED DATASET(kString) dummy, UNSIGNED4 model) :=
+                          STREAMED DATASET(kString) dummy, UNSIGNED4 seqId, UNSIGNED modelid = 0) :=
                             EMBED(Python: globalscope(globalScope), persist('query'), activity)
     import tensorflow as tf
     # Restore the Keras / TF context.
     tf.keras.backend.set_session(tfSession)
     try:
-      mod = modcache['default']
+      mod = modcache[modelid]
       w = mod.get_weights()
       return NpList2Tens(w)
     except:
@@ -341,15 +353,15 @@ EXPORT Keras := MODULE
     * Set the weights into the Keras / TF model.  The weights are sent as
     * a Tensor List (Tensor dataset), one Tensor per layer.
     */
-  EXPORT STREAMED DATASET(kString) SetWeights(STREAMED DATASET(t_Tensor) tens, UNSIGNED4 model) :=
-                        EMBED(Python: globalscope(globalScope), persist('query'), activity)
+  EXPORT STREAMED DATASET(kString) SetWeights(STREAMED DATASET(t_Tensor) tens, UNSIGNED4 seqId,
+              UNSIGNED modelid = 0) := EMBED(Python: globalscope(globalScope), persist('query'), activity)
     import tensorflow as tf
     import traceback as tb
     # Restore the Keras / TF context.
     tf.keras.backend.set_session(tfSession)
     try:
       w = Tens2NpList(tens)
-      mod = modcache['default']
+      mod = modcache[modelid]
       #w2 = mod.get_weights()
       #mod.set_weights(w)
       outStr = ''
@@ -369,8 +381,9 @@ EXPORT Keras := MODULE
               STREAMED DATASET(t_Tensor) weights,
               STREAMED DATASET(t_Tensor) x,
               STREAMED DATASET(t_Tensor) y,
-              UNSIGNED4 model,
-              UNSIGNED4 epoch) :=
+              UNSIGNED4 seqId,
+              UNSIGNED4 epoch,
+              UNSIGNED modelid = 0) :=
               EMBED(Python: globalscope(globalScope), persist('query'), activity)
     import traceback as tb
     import tensorflow as tf
@@ -378,16 +391,16 @@ EXPORT Keras := MODULE
     global currEpoch, batchCount, cumLoss
     try:
       # Accumulate the loss for each epoch.
-      if epoch != currEpoch:
-        batchCount = 0
-        cumLoss = 0.0
-        currEpoch = epoch
+      if epoch != currEpoch.get(modelid, 0):
+        batchCount[modelid] = 0
+        cumLoss[modelid] = 0.0
+        currEpoch[modelid] = epoch
       # Process this batch.
-      batchCount += 1
+      batchCount[modelid] += 1
       wA_changes = []
       # Restore Keras / TF context
       tf.keras.backend.set_session(tfSession)
-      mod = modcache['default']
+      mod = modcache[modelid]
       # Convert the incoming weights to a list of numpy arrays
       wA = Tens2NpList(weights)
       # Convert the X tensor to a numpy array
@@ -403,14 +416,13 @@ EXPORT Keras := MODULE
         # More Keras TF context restoration
         with tfSession.as_default():
           with tfSession.graph.as_default():
-            global tfHistory
             # Set the starting weights
             mod.set_weights(wA)
             # Run one batch to fit the model
             tfHistory = mod.fit(xA, yA, epochs=epoch, batch_size=32, initial_epoch=epoch-1, shuffle=False, steps_per_epoch = 1)
             # Update the cumulative (epoch) loss
             currLoss = tfHistory.history['loss'][-1]
-            cumLoss += currLoss
+            cumLoss[modelid] += currLoss
             # Get the new weights from Keras model.
             wA_out = mod.get_weights()
         # For each layer, subtract the new weights from the starting weights to compute
@@ -430,10 +442,16 @@ EXPORT Keras := MODULE
   /**
     * Get the current epoch's accumulated average loss up to this point.
     */
-  EXPORT STREAMED DATASET(losses) GetLoss(STREAMED DATASET(kString) dummy, UNSIGNED4 model):=
+  EXPORT STREAMED DATASET(losses) GetLoss(STREAMED DATASET(kString) dummy, UNSIGNED4 seqId,
+        UNSIGNED modelid = 0):=
         EMBED(Python: globalscope(globalScope), persist('query'), activity)
-    assert batchCount > 0, 'Keras.GetLoss: batchCount = 0' + ', currEpoch = ' + str(currEpoch)
-    loss = cumLoss / batchCount
+    global batchCount, cumLoss
+    try:
+      assert batchCount[modelid] > 0, 'Keras.GetLoss: batchCount = 0' + ', currEpoch = ' + str(currEpoch[modelid])
+      loss = cumLoss[modelid] / batchCount[modelid]
+    except:
+      assert False, format_exc('GetLoss -- modelId = ' + str(modelid) + ', batchCount = ' + str(batchCount))
+      return [(0.0,)]
     return [(loss,)]
   ENDEMBED;
   /**
@@ -444,9 +462,10 @@ EXPORT Keras := MODULE
   EXPORT STREAMED DATASET(metrics) Evaluate(
               STREAMED DATASET(t_Tensor) x,
               STREAMED DATASET(t_Tensor) y,
-              UNSIGNED4 model) :=
+              UNSIGNED4 seqId,
+              UNSIGNED modelid = 0) :=
               EMBED(Python: globalscope(globalScope), persist('query'), activity)
-    mod = modcache['default']
+    mod = modcache[modelid]
     # Convert x data to a numpy array
     xA = Tens2NpList(x)
     # Convert y data to a numpy array
@@ -471,11 +490,11 @@ EXPORT Keras := MODULE
     */
   EXPORT STREAMED DATASET(t_Tensor) Predict(
               STREAMED DATASET(t_Tensor) xDat,
-              UNSIGNED4 model) :=
+              UNSIGNED4 seqId,
+              UNSIGNED modelid = 0) :=
               EMBED(Python: globalscope(globalScope), persist('query'), activity)
     import numpy as np
     import traceback as tb
-    mod = modcache['default']
     try:
       def predGen():
         # We need to process the data one slice at a time, so that we can emit
@@ -505,6 +524,7 @@ EXPORT Keras := MODULE
           # Yield the output slice.
           yield y
         return
+      mod = modcache[modelid]
       return predGen()
     except:
       # An error occurred during Predict.
@@ -522,12 +542,11 @@ EXPORT Keras := MODULE
     */
   EXPORT STREAMED DATASET(kString) Shutdown(
               STREAMED DATASET(kString) temp,
-              UNSIGNED4 model) :=
+              UNSIGNED4 seqId) :=
               EMBED(Python: globalscope(globalScope), persist('query'), activity)
       import traceback as tb
       global nodeId, nNodes, maxSliceLen
       global modcache
-      global tfHistory
       global currEpoch
       global batchCount
       global cumLoss
@@ -540,7 +559,6 @@ EXPORT Keras := MODULE
         nodeId = None
         nNodes = None
         maxSliceLen = None
-        tfHistory = None
         currEpoch = None
         batchCount = None
         cumLoss = None
@@ -556,7 +574,6 @@ EXPORT Keras := MODULE
         del(nodeId)
         del(nNodes)
         del(maxSliceLen)
-        del(tfHistory)
         del(currEpoch)
         del(batchCount)
         del(cumLoss)

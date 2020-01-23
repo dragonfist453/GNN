@@ -70,6 +70,11 @@ nodeId := Thorlib.node();
   * <li>It is critical that this token passing is chained, or calls may occur out of order.
   * For example, Fit() could be called before DefineModel(), which would not produce good results.</li>
   * </ul>
+  * <p>MULTIPLE MODEL SUPPORT
+  * <p>GNNI supports multiple Keras models within the same work unit.  Multiple models are created
+  * by using multiple calls to DefineModel() using the same sessionId.  The returned modelIds are
+  * used in subsequent calls to discriminate between the models.  See Test/MultiModel.ecl for an
+  * example.
   */
 EXPORT GNNI := MODULE
   /**
@@ -78,7 +83,15 @@ EXPORT GNNI := MODULE
     * breaking the dependency chain.
     */
   SHARED UNSIGNED4 getToken(UNSIGNED4 lastToken) := EMBED(Python)
-    return lastToken + 1;
+    return lastToken + 1
+  ENDEMBED;
+  /**
+    * Obscure a value (from the ECL compiler) by returning it through a
+    * python function so that the compiler can't determine that it is
+    * a constant.
+    */
+  SHARED UNSIGNED4 obscure(UNSIGNED4 value) := EMBED(C++:action)
+    return value;
   ENDEMBED;
   /**
     * Each node returns status as a kString.   Returns an error message
@@ -92,6 +105,10 @@ EXPORT GNNI := MODULE
             '''Didn't recieve reply from all nodes: ''' + COUNT(results), rr1);
     return rr;
   END;
+
+  // Number by which to multiply the Keras model id in order to generate
+  // GNNI model ids.
+  SHARED kerasIdFactor := 100000;
   /**
     * Initialize Keras on all nodes and return a "session" token to be used on the
     * next call to GNNI.
@@ -135,7 +152,15 @@ EXPORT GNNI := MODULE
     mdefRepl := PROJECT(NOCOMBINE(mdefRepl0), TRANSFORM(RECORDOF(LEFT), SELF.nodeId := nodeId, SELF := LEFT), LOCAL);
     kstatus := ASSERT(Keras.DefineModel(mdefRepl, sess), LENGTH(text) = 0, 'DefineModel Exception: ' + text);
     status := reduceResults(kstatus);
-    model := IF(LENGTH(status) = 0, getToken(sess), 0);
+    // Extract the Keras modelId from the id field of the returned status.  Each node should have the
+    // same model id since they are kept in sync.  So we just use the one from our own node.
+    modelId := kstatus(nodeId = nodeId)[1].id;
+    // We need to generate an GNNI modelId that encompasses both the sequence, and encodes
+    // the Keras model id.
+    // We multiply the modelId by kerasIdFactor and use that as the basis for our returned modelId token.
+    // This allows up to kerasIdFactor operations on each model, which should be enough.
+    modelBase := modelId * kerasIdFactor;
+    model := IF(LENGTH(status) = 0, getToken(sess + modelBase), 0);
     RETURN model;
   END;
 
@@ -147,7 +172,8 @@ EXPORT GNNI := MODULE
     * @return A JSON string representing the model definition.
     */
   EXPORT STRING ToJSON(UNSIGNED4 mod) := FUNCTION
-    results := Keras.ToJSON(DATASET([], kString), mod);
+    kModelId := mod DIV kerasIdFactor;
+    results := Keras.ToJSON(DATASET([], kString), mod, kModelId);
     result := results[1].text;
     RETURN result;
   END;
@@ -171,7 +197,15 @@ EXPORT GNNI := MODULE
                                     SELF.text := json), LOCAL);
     kstatus := ASSERT(Keras.FromJSON(mdefRepl, sess), LENGTH(text) = 0, 'FromJSON Exception: ' + text, FAIL);
     status := reduceResults(kstatus);
-    model := IF(LENGTH(status) = 0, getToken(sess), 0);
+    // Extract the Keras modelId from the id field of the returned status.  Each node should have the
+    // same model id since they are kept in sync.  So we just use the one from our own node.
+    modelId := kstatus(nodeId = nodeId)[1].id;
+    // We need to generate an GNNI modelId that encompasses both the sequence, and encodes
+    // the Keras model id.
+    // We multiply the modelId by kerasIdFactor and use that as the basis for our returned modelId token.
+    // This allows up to kerasIdFactor operations on each model, which should be enough.
+    modelBase := modelId * kerasIdFactor;
+    model := IF(LENGTH(status) = 0, getToken(sess + modelBase), 0);
     RETURN model;
   END;
   /**
@@ -190,7 +224,7 @@ EXPORT GNNI := MODULE
     * <li>'''compile(loss='categorical_crossentropy', optimizer='adam', metrics=['accuracy'])'''</li></ul>
     * <p>It is convenient to use the triple single quote(''') syntax as
     *     it allows strings to cross line boundaries, and allows
-    *     special characters such as single or double quotes without
+    *     special characters such as siepochNumngle or double quotes without
     *     escaping.
     * <p>There is no need to make this call if the compileDef was provided
     * in the DefineModel(...) call.
@@ -209,7 +243,8 @@ EXPORT GNNI := MODULE
                                     SELF.id :=1,
                                     SELF.typ := kStrType.compile,
                                     SELF.text := compileStr), LOCAL);
-    kstatus := ASSERT(Keras.CompileMod(mdefRepl, model), LENGTH(text) = 0, 'CompileMod Exception: ' + text, FAIL);
+    kModelId := model DIV kerasIdFactor;
+    kstatus := ASSERT(Keras.CompileMod(mdefRepl, model, kModelId), LENGTH(text) = 0, 'CompileMod Exception: ' + text, FAIL);
     status := reduceResults(kstatus);
     RETURN getToken(model);
   END;
@@ -234,8 +269,9 @@ EXPORT GNNI := MODULE
     // Get the weights from a single node.  Note that weights should
     // be the same on all nodes since they are automatically
     // synchronized between nodes.
+    kModelId := model DIV kerasIdFactor;
     dummy := DATASET(1, TRANSFORM(kString, SELF.id := 1, SELF.typ := kStrType.None, SELF.text := ''), LOCAL);
-    weights := Keras.GetWeights(dummy, model);
+    weights := Keras.GetWeights(dummy, model, kModelId);
     RETURN weights(nodeId=0);
   END;
 
@@ -254,7 +290,8 @@ EXPORT GNNI := MODULE
     * @return A new model token to be used in subsequent calls.
     */
   EXPORT UNSIGNED4 SetWeights(UNSIGNED4 model, DATASET(t_Tensor) weights) := FUNCTION
-    kstatus := ASSERT(Keras.SetWeights(weights, model), LENGTH(text) = 0, 'SetWeights Exception: ' + text, FAIL);
+    kModelId := model DIV kerasIdFactor;
+    kstatus := ASSERT(Keras.SetWeights(weights, model, kModelId), LENGTH(text) = 0, 'SetWeights Exception: ' + text, FAIL);
     status := reduceResults(kstatus);
     mod :=  IF(LENGTH(status) = 0, getToken(model), 0);
     RETURN mod;
@@ -266,8 +303,9 @@ EXPORT GNNI := MODULE
     * @return The average loss.
     */
   EXPORT REAL GetLoss(UNSIGNED4 model) := FUNCTION
+    kModelId := model DIV kerasIdFactor;
     dummy := DATASET(1, TRANSFORM(kString, SELF.id := 1, SELF.typ := kStrType.None, SELF.text := ''), LOCAL);
-    trainLosses := Keras.GetLoss(dummy, model);
+    trainLosses := Keras.GetLoss(dummy, model, kModelId);
     // Each node provides the average loss across samples in the epoch.
     // We return the average of those averages.
     trainLoss := AVE(trainLosses, loss);
@@ -333,6 +371,7 @@ EXPORT GNNI := MODULE
                       DATASET(t_Tensor) y,
                       UNSIGNED4 batchSize = 100,
                       UNSIGNED4 numEpochs = 1) := FUNCTION
+    kModelId := model DIV kerasIdFactor;
     // Get the initial weights to use
     initWts0 := GetWeights(model);
     // We get the weights from the first node and then copy them to all nodes
@@ -351,7 +390,7 @@ EXPORT GNNI := MODULE
         batchPos := (batchNum-1) * batchSize + 1;
         xBatch := int.TensExtract(xAl, batchPos, batchSize);
         yBatch := int.TensExtract(yAl, batchPos, batchSize);
-        wtChanges0 := IF(EXISTS(yBatch), Keras.FitBatch(wts2, xBatch, yBatch, model, epochNum), DATASET([], t_Tensor));
+        wtChanges0 := IF(EXISTS(yBatch), Keras.FitBatch(wts2, xBatch, yBatch, obscure(model), epochNum, kModelId), DATASET([], t_Tensor));
         // Move all the changes for a given wi and slice to the same node.  Each
         // node has a set of wi/sliceIds to roll up.  Note that the original
         // weights are already replicated to all nodes.
@@ -359,20 +398,22 @@ EXPORT GNNI := MODULE
         // Sum up the original weights (de-replicated) and all changes for each wi and slice
         newWts := rollUpdates(wts2((wi + sliceId) % nNodes = nodeId), wtChanges);
         // Note: newWts have been replicated to all nodes by rollUpdates.
-        // We use epochNum + batchNum to generate a unique model token for
-        // use with GetLoss.  This ensures proper sequencing of the
-        // operation.
-        batchLoss := IF(EXISTS(newWts), GetLoss(model + epochNum + batchNum), 1.0);
-        logProgress2 := Syslog.addWorkunitInformation('Training Status (2): Epoch = ' + epochNum + ', Batch = ' + batchNum + ', Loss = ' + batchLoss);
+        // We use obscure to prevent the ECL compiler from treating GetLoss as a
+        // constant
+        batchLoss := IF(EXISTS(newWts), GetLoss(model + (batchesPerEpoch * (epochNum-1)) + batchNum), 1.0);
+        logProgress2 := Syslog.addWorkunitInformation('Training Status (2): ModelId = ' +
+                kModelId + ', Epoch = ' + epochNum + ', Batch = ' + batchNum + ', Loss = ' + batchLoss);
         RETURN newWts;
       END;
       epochWts := LOOP(wts1, batchesPerEpoch, doBatch(ROWS(LEFT), COUNTER));
-      epochLoss := IF(EXISTS(epochWts), GetLoss(model + epochNum), 1.0);
-      logProgress := Syslog.addWorkunitInformation('Training Status: Epoch = ' + epochNum + ', Loss = ' + epochLoss);
+      epochLoss := IF(EXISTS(epochWts), GetLoss(model + (batchesPerEpoch * (epochNum-1))), 1.0);
+      //epochLoss := IF(EXISTS(epochWts), GetLoss(obscure(model)), 1.0);
+      logProgress := Syslog.addWorkunitInformation('Training Status: ModelId = ' +
+                      kModelId + ', Epoch = ' + epochNum + ', Loss = ' + epochLoss);
       RETURN WHEN(epochWts, logProgress);
     END;
     finalWts := LOOP(initWts, numEpochs, doEpoch(ROWS(LEFT), COUNTER));
-    RETURN IF(EXISTS(finalWts), getToken(model), 0);
+    RETURN IF(EXISTS(finalWts), getToken(model + numEpochs * numEpochs), 0);
   END; // Fit
   /**
     * Determine the loss and other metrics in order to evaluate
@@ -396,12 +437,13 @@ EXPORT GNNI := MODULE
   EXPORT DATASET(Types.metrics) EvaluateMod(UNSIGNED4 model,
                       DATASET(t_Tensor) x,
                       DATASET(t_Tensor) y) := FUNCTION
+    kModelId := model DIV kerasIdFactor;
     // Align the X and Y tensors so that we will get the corresponding records on the same nodes
     y1 := PROJECT(y, TRANSFORM(RECORDOF(LEFT), SELF.wi := 2, SELF := LEFT), LOCAL);
     aligned := Tensor.R4.AlignTensorPair(x + y1);
     xAl := aligned(wi = 1);
     yAl := PROJECT(aligned(wi = 2), TRANSFORM(RECORDOF(LEFT), SELF.wi := 1, SELF := LEFT), LOCAL);
-    m0 := Keras.Evaluate(xAl, yAl, model);
+    m0 := Keras.Evaluate(xAl, yAl, model, kModelId);
     m1 := DISTRIBUTE(m0, metricId);
     m2 := TABLE(m1,
                 {metricId, metricName, avgVal := AVE(GROUP, value)},
@@ -427,7 +469,8 @@ EXPORT GNNI := MODULE
     *       tensor.
     */
   EXPORT DATASET(t_Tensor) Predict(UNSIGNED4 model, DATASET(t_Tensor) x) := FUNCTION
-    pred := Keras.Predict(x, model);
+    kModelId := model DIV kerasIdFactor;
+    pred := Keras.Predict(x, model, kModelId);
     return pred;
   END;
   /**
