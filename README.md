@@ -6,11 +6,12 @@ It provides Keras / Tensorflow operations parallelized over an HPCC cluster.
 Models are created on each HPCC node, and training, evaluation and predictions
 are done in a distributed fashion across the HPCC cluster.
 
-The Module GNNI defines the ECL interface to Keras.  It currently only supports
-the Keras Sequential model.
+The Module GNNI defines the ECL interface to Keras.  It supports any Keras
+model (Functional or Sequential), and allows models with multiple inputs
+and outputs.
 
 GNN is designed to handle any type of Neural Network model that can be built
-using the Keras Sequential model.  This includes Classical Neural Networks as
+using Keras.  This includes Classical Neural Networks as
 well as Convolutional Networks and Recursive Networks such as LSTM, or any combination
 of the above.
 
@@ -28,7 +29,14 @@ that Python3 and Tensorflow are correctly installed on each Thor node.
 
 ## EXAMPLES
 The files Test/ClassicTest.ecl and ClassificationTest.ecl show annotated examples
-of using GNN to create a simple Classical Neural Networks.  The folder Test/HARTests
+of using GNN to create a simple Classical Neural Networks using the Keras Sequential
+model.
+
+The file Test/FuncModelTest.ecl shows an example of building a classical regression /
+classification network with multiple inputs and outputs using the Keras Functional
+model.
+
+The folder Test/HARTests
 contains tests that show how to create more sophisticated Convolutional and
 Recurrent networks.
 

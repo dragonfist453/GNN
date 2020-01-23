@@ -19,12 +19,19 @@ t_Tensor := Tensor.R4.t_Tensor;
 TensData := Tensor.R4.TensData;
 nNodes := Thorlib.nodes();
 nodeId := Thorlib.node();
+FuncLayerDef := GNN.Types.FuncLayerDef;
 /**
   * Generalized Neural Network Interface
   *
-  * <p>Provides a generalized ECL interface to Keras over Tensorflow.  It currently only supports
-  * the Keras Sequential Model.
-  * <p><h1> THEORY OF OPERATION</h1>
+  * <p>Provides a generalized ECL interface to Keras over Tensorflow.  It supports the Keras Functional
+  * API as well as the Sequential API.
+  * <p>The Functional style allows models to be defined as a Directed Acyclic Graph (DAG), allowing branching
+  * and merging among the layers. It is required for models that have multiple inputs or outputs.
+  * For an annotated example using the Functional model with multiple inputs and outputs, see
+  * Test/FuncModelTest.ecl
+  * <p>The Sequential stle is a bit simpler, but requires a strict sequence of layers, each one feeding
+  * into the next.  For an annotated example using the Sequential model, see Test/ClassicTest.ecl
+  * <p>THEORY OF OPERATION
   * <p>A Keras / TF model is built on each HPCC node and training data is distributed among the nodes.
   * Distributed Synchronous Batch Gradient Descent is performed across nodes, synchronizing weights
   * periodically based on the 'batchSize' parameter.  Each function performs its work in a
@@ -33,8 +40,11 @@ nodeId := Thorlib.node();
   * <p>The flow of a program using this interface is as follows:<ul>
   * <li>GetSession() -- Initialized Keras / TF and returns a session token. This must be called
   * before any other operations.</li>
-  * <li>DefineModel(...) -- Construct the Keras model by providing a list of Python statements, one
+  * <li>DefineModel(...) -- Construct a Keras Sequential model by providing a list of Python statements, one
   * to construct each layer of the neural network as well as an optional compile definition statement.</li>
+  * <li>DefineFuncModel(...) -- Construct a Keras Functional Model.  This allows construction of
+  * complex models that cannot be expressed as a sequential set of layers. These include models with multiple
+  * inputs or outputs, or models that use divergence or convergence among different layers.</li>
   * <li>CompileMod(...) -- (Optional) Pass the Keras model compilation statement and perform it on
   * the model.  This is only required if the compile definition was not provided in DefineModel (above).</li>
   * <li>Fit(...) -- Trains the model across the nodes of the cluster, based on provided training data.</li>
@@ -51,6 +61,8 @@ nodeId := Thorlib.node();
   * <p>Tensors can be used to convey record-oriented information such as training data as well as block
   * oriented data like weights.  Both can be N-dimensional.  For record-oriented data, the first shape
   * component is 0 (unspecified) indicating that it can hold an arbitrary set of records.
+  * <p>For models with multiple inputs or outputs, Tensor Lists are used (see Tensor.ecl for details),
+  * with one Tensor per input or output.
   * <p>USE OF NumericField
   * <p>GNNI also provides a set of interfaces which take in and emit data as 2-dimensional NumericField
   * datasets (see ML_Core.Types.NumericField).  This is purely for convenience for applications that
@@ -70,6 +82,11 @@ nodeId := Thorlib.node();
   * <li>It is critical that this token passing is chained, or calls may occur out of order.
   * For example, Fit() could be called before DefineModel(), which would not produce good results.</li>
   * </ul>
+  * <p>MULTIPLE MODEL SUPPORT
+  * <p>GNNI supports multiple Keras models within the same work unit.  Multiple models are created
+  * by using multiple calls to DefineModel() using the same sessionId.  The returned modelIds are
+  * used in subsequent calls to discriminate between the models.  See Test/MultiModel.ecl for an
+  * example.
   */
 EXPORT GNNI := MODULE
   /**
@@ -78,7 +95,15 @@ EXPORT GNNI := MODULE
     * breaking the dependency chain.
     */
   SHARED UNSIGNED4 getToken(UNSIGNED4 lastToken) := EMBED(Python)
-    return lastToken + 1;
+    return lastToken + 1
+  ENDEMBED;
+  /**
+    * Obscure a value (from the ECL compiler) by returning it through a
+    * python function so that the compiler can't determine that it is
+    * a constant.
+    */
+  SHARED UNSIGNED4 obscure(UNSIGNED4 value) := EMBED(C++:action)
+    return value;
   ENDEMBED;
   /**
     * Each node returns status as a kString.   Returns an error message
@@ -92,6 +117,10 @@ EXPORT GNNI := MODULE
             '''Didn't recieve reply from all nodes: ''' + COUNT(results), rr1);
     return rr;
   END;
+
+  // Number by which to multiply the Keras model id in order to generate
+  // GNNI model ids.
+  SHARED kerasIdFactor := 100000;
   /**
     * Initialize Keras on all nodes and return a "session" token to be used on the
     * next call to GNNI.
@@ -121,7 +150,7 @@ EXPORT GNNI := MODULE
     * @param sess The session token from a previous call to GetSesion().
     * @param ldef A set of python strings as would be passed to Keras
     *         model.add().  Each string defines one layer of the model.
-    * @param cdef A python string as would be passed to Keras model.compile(...).
+    * @param cdef (optional) A python string as would be passed to Keras model.compile(...).
     *         This line should begin with "compile".  Model is implicit here.
     * @return A model token to be used in subsequent GNNI calls.
     */
@@ -135,10 +164,60 @@ EXPORT GNNI := MODULE
     mdefRepl := PROJECT(NOCOMBINE(mdefRepl0), TRANSFORM(RECORDOF(LEFT), SELF.nodeId := nodeId, SELF := LEFT), LOCAL);
     kstatus := ASSERT(Keras.DefineModel(mdefRepl, sess), LENGTH(text) = 0, 'DefineModel Exception: ' + text);
     status := reduceResults(kstatus);
-    model := IF(LENGTH(status) = 0, getToken(sess), 0);
+    // Extract the Keras modelId from the id field of the returned status.  Each node should have the
+    // same model id since they are kept in sync.  So we just use the one from our own node.
+    modelId := kstatus(nodeId = nodeId)[1].id;
+    // We need to generate an GNNI modelId that encompasses both the sequence, and encodes
+    // the Keras model id.
+    // We multiply the modelId by kerasIdFactor and use that as the basis for our returned modelId token.
+    // This allows up to kerasIdFactor operations on each model, which should be enough.
+    modelBase := modelId * kerasIdFactor;
+    model := IF(LENGTH(status) = 0, getToken(sess + modelBase), 0);
     RETURN model;
   END;
-
+  /**
+    * DefineFuncModel(...) -- Construct a Keras Functional Model.  This allows construction of
+    * complex models that cannot be expressed as a sequential set of layers. These include models with multiple
+    * inputs or outputs, or models that use divergence or convergence among different layers.
+    * <p>Layers are connected together using the layerName and predecessor fields of the FuncLayerDef.
+    * The inputs of a layer are connected to the predecessor layers in the order specified by the
+    * set of names in the predecessor field.
+    * <p>The inputs and outputs parameter specifies the names of the layers that form the input and
+    * output of the model.
+    * <p>This is similar to the Keras Functional API, except that the entire model is defined in one
+    * call rather than assembled piecemeal as in the Functional API.  The same rules apply here as
+    * for the Keras Functional API, and this should be a simple translation of any program using the
+    * Functional API.
+    * <p>For models with multiple inputs, input is specified as a list of tensors (see Tensor.ecl).
+    * <p>For models with multiple outputs, output will be a list of tensors.
+    * @param sess The session token from a previous call to GetSesion().
+    * @param lDefs A series of layer definitions using the Types.FuncLayerDef format.
+    * @param inputs A list of the names of the layers that represent the inputs to the model.
+    * @param outputs A list of the names of the layers that represent the outputs of the model.
+    * @param cdef (optional) A python string as would be passed to Keras model.compile(...).
+    *         This line should begin with "compile".  Model is implicit here.
+    * @see Types.FuncLayerDef
+    */
+  EXPORT UNSIGNED4 DefineFuncModel(UNSIGNED sess,
+                                   DATASET(FuncLayerDef) lDefs,
+                                   SET OF STRING inputs,
+                                   SET OF STRING outputs,
+                                   STRING cdef = '') := FUNCTION
+    // Distribute the lDefs to all nodes to make sure that the model is defined on each node
+    lDefsRepl := DISTRIBUTE(lDefs, ALL);
+    kstatus := ASSERT(Keras.DefineFuncModel(lDefsRepl, sess, inputs, outputs, cdef), LENGTH(text) = 0, 'DefineFuncModel Exception: ' + text);
+    status := reduceResults(kstatus);
+    // Extract the Keras modelId from the id field of the returned status.  Each node should have the
+    // same model id since they are kept in sync.  So we just use the one from our own node.
+    modelId := kstatus(nodeId = nodeId)[1].id;
+    // We need to generate an GNNI modelId that encompasses both the sequence, and encodes
+    // the Keras model id.
+    // We multiply the modelId by kerasIdFactor and use that as the basis for our returned modelId token.
+    // This allows up to kerasIdFactor operations on each model, which should be enough.
+    modelBase := modelId * kerasIdFactor;
+    model := IF(LENGTH(status) = 0, getToken(sess + modelBase), 0);
+    RETURN model;
+  END;
   /**
     * Return a JSON representation of the Keras model.
     *
@@ -147,7 +226,8 @@ EXPORT GNNI := MODULE
     * @return A JSON string representing the model definition.
     */
   EXPORT STRING ToJSON(UNSIGNED4 mod) := FUNCTION
-    results := Keras.ToJSON(DATASET([], kString), mod);
+    kModelId := mod DIV kerasIdFactor;
+    results := Keras.ToJSON(DATASET([], kString), mod, kModelId);
     result := results[1].text;
     RETURN result;
   END;
@@ -171,7 +251,15 @@ EXPORT GNNI := MODULE
                                     SELF.text := json), LOCAL);
     kstatus := ASSERT(Keras.FromJSON(mdefRepl, sess), LENGTH(text) = 0, 'FromJSON Exception: ' + text, FAIL);
     status := reduceResults(kstatus);
-    model := IF(LENGTH(status) = 0, getToken(sess), 0);
+    // Extract the Keras modelId from the id field of the returned status.  Each node should have the
+    // same model id since they are kept in sync.  So we just use the one from our own node.
+    modelId := kstatus(nodeId = nodeId)[1].id;
+    // We need to generate an GNNI modelId that encompasses both the sequence, and encodes
+    // the Keras model id.
+    // We multiply the modelId by kerasIdFactor and use that as the basis for our returned modelId token.
+    // This allows up to kerasIdFactor operations on each model, which should be enough.
+    modelBase := modelId * kerasIdFactor;
+    model := IF(LENGTH(status) = 0, getToken(sess + modelBase), 0);
     RETURN model;
   END;
   /**
@@ -190,7 +278,7 @@ EXPORT GNNI := MODULE
     * <li>'''compile(loss='categorical_crossentropy', optimizer='adam', metrics=['accuracy'])'''</li></ul>
     * <p>It is convenient to use the triple single quote(''') syntax as
     *     it allows strings to cross line boundaries, and allows
-    *     special characters such as single or double quotes without
+    *     special characters such as siepochNumngle or double quotes without
     *     escaping.
     * <p>There is no need to make this call if the compileDef was provided
     * in the DefineModel(...) call.
@@ -209,7 +297,8 @@ EXPORT GNNI := MODULE
                                     SELF.id :=1,
                                     SELF.typ := kStrType.compile,
                                     SELF.text := compileStr), LOCAL);
-    kstatus := ASSERT(Keras.CompileMod(mdefRepl, model), LENGTH(text) = 0, 'CompileMod Exception: ' + text, FAIL);
+    kModelId := model DIV kerasIdFactor;
+    kstatus := ASSERT(Keras.CompileMod(mdefRepl, model, kModelId), LENGTH(text) = 0, 'CompileMod Exception: ' + text, FAIL);
     status := reduceResults(kstatus);
     RETURN getToken(model);
   END;
@@ -234,8 +323,9 @@ EXPORT GNNI := MODULE
     // Get the weights from a single node.  Note that weights should
     // be the same on all nodes since they are automatically
     // synchronized between nodes.
+    kModelId := model DIV kerasIdFactor;
     dummy := DATASET(1, TRANSFORM(kString, SELF.id := 1, SELF.typ := kStrType.None, SELF.text := ''), LOCAL);
-    weights := Keras.GetWeights(dummy, model);
+    weights := Keras.GetWeights(dummy, model, kModelId);
     RETURN weights(nodeId=0);
   END;
 
@@ -254,7 +344,8 @@ EXPORT GNNI := MODULE
     * @return A new model token to be used in subsequent calls.
     */
   EXPORT UNSIGNED4 SetWeights(UNSIGNED4 model, DATASET(t_Tensor) weights) := FUNCTION
-    kstatus := ASSERT(Keras.SetWeights(weights, model), LENGTH(text) = 0, 'SetWeights Exception: ' + text, FAIL);
+    kModelId := model DIV kerasIdFactor;
+    kstatus := ASSERT(Keras.SetWeights(weights, model, kModelId), LENGTH(text) = 0, 'SetWeights Exception: ' + text, FAIL);
     status := reduceResults(kstatus);
     mod :=  IF(LENGTH(status) = 0, getToken(model), 0);
     RETURN mod;
@@ -266,8 +357,9 @@ EXPORT GNNI := MODULE
     * @return The average loss.
     */
   EXPORT REAL GetLoss(UNSIGNED4 model) := FUNCTION
+    kModelId := model DIV kerasIdFactor;
     dummy := DATASET(1, TRANSFORM(kString, SELF.id := 1, SELF.typ := kStrType.None, SELF.text := ''), LOCAL);
-    trainLosses := Keras.GetLoss(dummy, model);
+    trainLosses := Keras.GetLoss(dummy, model, kModelId);
     // Each node provides the average loss across samples in the epoch.
     // We return the average of those averages.
     trainLoss := AVE(trainLosses, loss);
@@ -333,16 +425,21 @@ EXPORT GNNI := MODULE
                       DATASET(t_Tensor) y,
                       UNSIGNED4 batchSize = 100,
                       UNSIGNED4 numEpochs = 1) := FUNCTION
+    kModelId := model DIV kerasIdFactor;
     // Get the initial weights to use
     initWts0 := GetWeights(model);
     // We get the weights from the first node and then copy them to all nodes
     // so that everybody starts with the same weights
     initWts := Tensor.R4.Replicate(initWts0);
-    // Align the X and Y tensors so that we will get the corresponding records on the same nodes
-    y1 := PROJECT(y, TRANSFORM(RECORDOF(LEFT), SELF.wi := 2, SELF := LEFT), LOCAL);
-    aligned := Tensor.R4.AlignTensorPair(x + y1);
-    xAl := aligned(wi = 1);
-    yAl := PROJECT(aligned(wi = 2), TRANSFORM(RECORDOF(LEFT), SELF.wi := 1, SELF := LEFT), LOCAL);
+    // Align the X and Y tensor lists so that we will get the corresponding records on the same nodes
+    // for each input and output tensor.
+    maxInputWi := MAX(x, wi);
+    // Change the wi's for outputs (y) so that they are after the input wi's
+    y1 := PROJECT(y, TRANSFORM(RECORDOF(LEFT), SELF.wi := LEFT.wi + maxInputWi, SELF := LEFT), LOCAL);
+    aligned := Tensor.R4.AlignTensors(x + y1);
+    // Now change the Y's wi back to the original numbers
+    xAl := aligned(wi <= maxInputWi);
+    yAl := PROJECT(aligned(wi > maxInputWi), TRANSFORM(RECORDOF(LEFT), SELF.wi := LEFT.wi - maxInputWi, SELF := LEFT), LOCAL);
     totalRecords := Tensor.R4.GetRecordCount(yAl);
     batchesPerEpoch := ROUNDUP(totalRecords / nNodes / batchSize);
     DATASET(t_Tensor) doEpoch(DATASET(t_Tensor) wts1, UNSIGNED epochNum) := FUNCTION
@@ -351,7 +448,7 @@ EXPORT GNNI := MODULE
         batchPos := (batchNum-1) * batchSize + 1;
         xBatch := int.TensExtract(xAl, batchPos, batchSize);
         yBatch := int.TensExtract(yAl, batchPos, batchSize);
-        wtChanges0 := IF(EXISTS(yBatch), Keras.FitBatch(wts2, xBatch, yBatch, model, epochNum), DATASET([], t_Tensor));
+        wtChanges0 := IF(EXISTS(yBatch), Keras.FitBatch(wts2, xBatch, yBatch, obscure(model), epochNum, kModelId), DATASET([], t_Tensor));
         // Move all the changes for a given wi and slice to the same node.  Each
         // node has a set of wi/sliceIds to roll up.  Note that the original
         // weights are already replicated to all nodes.
@@ -359,20 +456,22 @@ EXPORT GNNI := MODULE
         // Sum up the original weights (de-replicated) and all changes for each wi and slice
         newWts := rollUpdates(wts2((wi + sliceId) % nNodes = nodeId), wtChanges);
         // Note: newWts have been replicated to all nodes by rollUpdates.
-        // We use epochNum + batchNum to generate a unique model token for
-        // use with GetLoss.  This ensures proper sequencing of the
-        // operation.
-        batchLoss := IF(EXISTS(newWts), GetLoss(model + epochNum + batchNum), 1.0);
-        logProgress2 := Syslog.addWorkunitInformation('Training Status (2): Epoch = ' + epochNum + ', Batch = ' + batchNum + ', Loss = ' + batchLoss);
+        // We use obscure to prevent the ECL compiler from treating GetLoss as a
+        // constant
+        batchLoss := IF(EXISTS(newWts), GetLoss(model + (batchesPerEpoch * (epochNum-1)) + batchNum), 1.0);
+        logProgress2 := Syslog.addWorkunitInformation('Training Status (2): ModelId = ' +
+                kModelId + ', Epoch = ' + epochNum + ', Batch = ' + batchNum + ', Loss = ' + batchLoss);
         RETURN newWts;
       END;
       epochWts := LOOP(wts1, batchesPerEpoch, doBatch(ROWS(LEFT), COUNTER));
-      epochLoss := IF(EXISTS(epochWts), GetLoss(model + epochNum), 1.0);
-      logProgress := Syslog.addWorkunitInformation('Training Status: Epoch = ' + epochNum + ', Loss = ' + epochLoss);
+      epochLoss := IF(EXISTS(epochWts), GetLoss(model + (batchesPerEpoch * (epochNum-1))), 1.0);
+      //epochLoss := IF(EXISTS(epochWts), GetLoss(obscure(model)), 1.0);
+      logProgress := Syslog.addWorkunitInformation('Training Status: ModelId = ' +
+                      kModelId + ', Epoch = ' + epochNum + ', Loss = ' + epochLoss);
       RETURN WHEN(epochWts, logProgress);
     END;
     finalWts := LOOP(initWts, numEpochs, doEpoch(ROWS(LEFT), COUNTER));
-    RETURN IF(EXISTS(finalWts), getToken(model), 0);
+    RETURN IF(EXISTS(finalWts), getToken(model + numEpochs * numEpochs), 0);
   END; // Fit
   /**
     * Determine the loss and other metrics in order to evaluate
@@ -396,12 +495,17 @@ EXPORT GNNI := MODULE
   EXPORT DATASET(Types.metrics) EvaluateMod(UNSIGNED4 model,
                       DATASET(t_Tensor) x,
                       DATASET(t_Tensor) y) := FUNCTION
-    // Align the X and Y tensors so that we will get the corresponding records on the same nodes
-    y1 := PROJECT(y, TRANSFORM(RECORDOF(LEFT), SELF.wi := 2, SELF := LEFT), LOCAL);
-    aligned := Tensor.R4.AlignTensorPair(x + y1);
-    xAl := aligned(wi = 1);
-    yAl := PROJECT(aligned(wi = 2), TRANSFORM(RECORDOF(LEFT), SELF.wi := 1, SELF := LEFT), LOCAL);
-    m0 := Keras.Evaluate(xAl, yAl, model);
+    kModelId := model DIV kerasIdFactor;
+    // Align the X and Y tensor lists so that we will get the corresponding records on the same nodes
+    // for each input and output tensor.
+    maxInputWi := MAX(x, wi);
+    // Change the wi's for outputs (y) so that they are after the input wi's
+    y1 := PROJECT(y, TRANSFORM(RECORDOF(LEFT), SELF.wi := LEFT.wi + maxInputWi, SELF := LEFT), LOCAL);
+    aligned := Tensor.R4.AlignTensors(x + y1);
+    // Now change the Y's wi back to the original number
+    xAl := aligned(wi <= maxInputWi);
+    yAl := PROJECT(aligned(wi > maxInputWi), TRANSFORM(RECORDOF(LEFT), SELF.wi := LEFT.wi - maxInputWi, SELF := LEFT), LOCAL);
+    m0 := Keras.Evaluate(xAl, yAl, model, kModelId);
     m1 := DISTRIBUTE(m0, metricId);
     m2 := TABLE(m1,
                 {metricId, metricName, avgVal := AVE(GROUP, value)},
@@ -415,7 +519,8 @@ EXPORT GNNI := MODULE
     * Predict the results using the trained model.
     * <p>The X tensor represents the independent (input) data
     * for the neural network and the output is returned as
-    * a tensor.
+    * a tensor.  Input and output will be Tensor Lists if
+    * there is more than one input or output tensor for the NN.
     * <p>The X tensor
     * should be a record-oriented tensor, indicated by a first shape
     * component of zero.  It must also be distributed (not replicated)
@@ -427,7 +532,12 @@ EXPORT GNNI := MODULE
     *       tensor.
     */
   EXPORT DATASET(t_Tensor) Predict(UNSIGNED4 model, DATASET(t_Tensor) x) := FUNCTION
-    pred := Keras.Predict(x, model);
+    kModelId := model DIV kerasIdFactor;
+    // Align all of the X tensors (in case of multi tensor inputs)
+    maxInputWi := MAX(x, wi); // The number of tensors in the input
+    aligned := Tensor.R4.AlignTensors(x);
+    xAl := IF(maxInputWi > 1, aligned, x); // Only align if multiple tensors in input
+    pred := Keras.Predict(xAl, model, kModelId);
     return pred;
   END;
   /**
