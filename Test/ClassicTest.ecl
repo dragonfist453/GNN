@@ -24,6 +24,8 @@ RAND_MAX := POWER(2,32) -1;
 trainCount := 1000;
 testCount := 1000;
 featureCount := 5;
+batchSize := 128;
+numEpochs := 5;
 // END Test parameters
 
 // Prepare training data.
@@ -138,7 +140,7 @@ OUTPUT(wts, NAMED('InitWeights'));
 
 // Fit trains the models, given training X and Y data.  BatchSize is not the Keras batchSize,
 // but defines how many records are processed on each node before synchronizing the weights
-mod2 := GNNI.Fit(mod, trainX, trainY, batchSize := 128, numEpochs := 5);
+mod2 := GNNI.Fit(mod, trainX, trainY, batchSize := batchSize, numEpochs := numEpochs);
 
 OUTPUT(mod2, NAMED('mod2'));
 

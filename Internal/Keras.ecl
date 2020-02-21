@@ -13,6 +13,7 @@ t_Tensor := Tensor.R4.t_Tensor;
 kString := iTypes.kString;
 losses := iTypes.losses;
 metrics := Types.metrics;
+FuncLayerDef := Types.FuncLayerDef;
 nNodes := Thorlib.nodes();
 node := Thorlib.node();
 /**
@@ -81,8 +82,8 @@ EXPORT Keras := MODULE
       # can return it.  It indicates where and why an error occurred.
       def _format_exc(func=''):
         import traceback as tb
-        exc = tb.format_exc()
-        if len(exc) < 10000:
+        exc = tb.format_exc(limit=2)
+        if len(exc) < 100000:
           return func + ': ' + exc
         else:
           return func + ': ' + exc[:200] + ' ... ' + exc[-200:]
@@ -90,13 +91,19 @@ EXPORT Keras := MODULE
 
       # Convert an ECL Tensor dataset into a single numpy ndarray.
       global Tens2Np
-      def _Tens2Np(tens):
+      def _Tens2Np(tens, recordOriented = False):
         def addData(a, dat, pos, is_fixed_size):
           if is_fixed_size:
             a[pos:pos+len(dat)] = dat
           else:
             a = np.append(a, dat)
           return a
+        def verifyShape(shape):
+          if recordOriented and shape[0] != 0:
+            raise Exception('Record Oriented tensors ' + \
+              'as data input to Fit or Predict must have a zero first shape component. Shape = ' + str(shape) + '.')
+          #assert not recordOriented or (recordOriented and shape[0] == 0), 'Keras.ecl: Tens2Np: Record Oriented tensors ' + \
+          #  'as data input to Fit or Predict must have a zero first shape component. Shape = ' + str(shape) + '.'
         try:
           a = None
           tshape = []
@@ -109,6 +116,7 @@ EXPORT Keras := MODULE
           isFixedSize = False
           for rec in tens:
             node, wi, sliceId, shape, dataType, maxSliceSize, sliceSize, densedat, sparsedat = rec
+            verifyShape(shape)
             dtype = dTypeDict[dataType]
             tshape = shape
             if a is None:
@@ -150,7 +158,7 @@ EXPORT Keras := MODULE
           origShape = list(a.shape)
           flatA = a.reshape(-1)
           flatSize = flatA.shape[0]
-          sliceId = 1
+          currSlice = 1
           indx = 0
           datType = dTypeDictR[str(a.dtype)]
           elemSize = dTypeSizeDict[datType]
@@ -170,18 +178,18 @@ EXPORT Keras := MODULE
             for i in range(len(dat)):
               if abs(dat[i]) > epsilon:
                 elemCount += 1
-            if elemCount > 0 or sliceId == 1:
+            if elemCount > 0 or currSlice == 1:
               if elemCount * (elemSize + 4) < len(dat):
                 # Sparse encoding
                 sparse = []
                 for i in range(len(dat)):
                   if abs(dat[i]) > epsilon:
                     sparse.append((i, dat[i]))
-                yield (nodeId, wi, sliceId, origShape, datType, maxSliceSize, sliceSize, [], sparse)
+                yield (nodeId, wi, currSlice, origShape, datType, maxSliceSize, sliceSize, [], sparse)
               else:
                 # Dense encoding
-                yield (nodeId, wi, sliceId, origShape, datType, maxSliceSize, sliceSize, dat, [])
-            sliceId += 1
+                yield (nodeId, wi, currSlice, origShape, datType, maxSliceSize, sliceSize, dat, [])
+            currSlice += 1
             indx += sliceSize
         except:
           assert 1 == 0, format_exc('NP2Tens')
@@ -197,7 +205,7 @@ EXPORT Keras := MODULE
       global Tens2NpList
       # Convert a list of numpy ndarrays into an ECL tensor dataset.  Uses wi's to
       # distinguish the multiple tensors in the same dataset.
-      def _Tens2NpList(tens):
+      def _Tens2NpList(tens, recordOriented = False):
         npList = []
         slices = []
         currWi = 1
@@ -205,12 +213,12 @@ EXPORT Keras := MODULE
           node = slice[0]
           wi = slice[1]
           if wi != currWi:
-            npList.append(Tens2Np(slices))
+            npList.append(Tens2Np(slices, recordOriented=recordOriented))
             currWi = wi
             slices = []
           slices.append(slice)
         if slices:
-          npList.append(Tens2Np(slices))
+          npList.append(Tens2Np(slices, recordOriented=recordOriented))
         return npList
       Tens2NpList = _Tens2NpList
       # END OF InitGlobals
@@ -243,6 +251,9 @@ EXPORT Keras := MODULE
     global tfSession
     global nextModId
     try:
+      # Allocate a new modelId
+      modId = nextModId
+      nextModId += 1
       # Restore the keras / tensorflow context.  It sometimes gets lost between calls,
       # so we explicitly restore it before each call that uses it.
       tfSession = tf.keras.backend.get_session()
@@ -262,19 +273,93 @@ EXPORT Keras := MODULE
             # compile string should be supplied.
             elif rectype == kStrTypeDict['compile']:
               exec('mod.' + rec[3])
-        modId = nextModId
-        nextModId += 1
-        modcache[modId] = mod
-        # For some reason we need to do a get_weights / set_weights here, or set_weights
-        # fails later???
-        w = mod.get_weights()
-        mod.set_weights(w)
-        # We succeeded.  Return a blank status to indicate success.
-        return [(nodeId, modId, kStrTypeDict['status'], '')]
+          # For some reason we need to do a get_weights / set_weights here, or set_weights
+          # fails later???
+          w = mod.get_weights()
+          mod.set_weights(w)
+          # Add this model to the model cache
+          modcache[modId] = mod
+      # We succeeded.  Return a blank status to indicate success.
+      return [(nodeId, modId, kStrTypeDict['status'], '')]
     except:
       # We had an error.  Format the exception and return it in the kString
       return [(nodeId, 1, kStrTypeDict['status'], format_exc('DefineMod'))]
-  ENDEMBED;
+  ENDEMBED; // DefineModel
+  /** Function to Define a Functional (i.e. Non-Sequential) model and (optionally)
+    * compile the model.
+    * Returns a kString dataset.  An empty string indicates success.  Otherwise
+    * the kString record contains an error message.
+    * DefineFuncModel gets called on each node of the cluster.
+    */
+  EXPORT STREAMED DATASET(kString) DefineFuncModel(STREAMED DATASET(FuncLayerDef) ldefs,
+                                              UNSIGNED4 seqId,
+                                              SET OF STRING inputs,
+                                              SET OF STRING outputs,
+                                              STRING cdef)
+                      := EMBED(Python: globalscope(globalScope), persist('query'), activity)
+    import traceback as tb
+    import tensorflow as tf
+    from tensorflow.keras import layers
+    global tfSession
+    global nextModId
+    try:
+      # Allocate a new modelId
+      modId = nextModId
+      nextModId += 1
+      # Restore the keras / tensorflow context.  It sometimes gets lost between calls,
+      # so we explicitly restore it before each call that uses it.
+      tfSession = tf.keras.backend.get_session()
+      layerDict = {} # Temporary dictionary for keeping track of layers.
+      predDict = {} # Temporary dict for keeping track of predecessors.
+      with tfSession.as_default():
+        with tfSession.graph.as_default():
+          # Do two passes through the ldefs so that order of layers won't matter
+          for rec in ldefs:
+            lName, ldef, preds = rec
+            newLayer = eval(ldef)
+            layerDict[lName] = newLayer
+            predDict[lName] = preds
+          # Second pass to resolve the predecessors
+          for name in layerDict.keys():
+            layer = layerDict[name]
+            predNames = predDict[name]
+            lpreds = []
+            for predName in predNames:
+              pred = layerDict[predName]
+              lpreds.append(pred)
+            # Call the layer object's call method with the list of predecessors
+            # to set the preds for that layer.
+            if lpreds:
+              if len(lpreds) == 1:
+                layer = layer(lpreds[0])
+              else:
+                layer = layer(lpreds)
+              layerDict[name] = layer
+          # Now create the model using inputs and outputs
+          inps = []
+          outps = []
+          for inpName in inputs:
+            l = layerDict[inpName]
+            inps.append(l)
+          for outName in outputs:
+            l = layerDict[outName]
+            outps.append(l)
+          mod = tf.keras.models.Model(inputs=inps, outputs=outps)
+          # If there's a compile string, use it to compile the model.
+          if cdef:
+            exec('mod.' + cdef)
+          # For some reason we need to do a get_weights / set_weights here, or set_weights
+          # fails later???
+          w = mod.get_weights()
+          mod.set_weights(w)
+          # Add this model to the model cache
+          modcache[modId] = mod
+      # We succeeded.  Return a blank status to indicate success.
+      return [(nodeId, modId, kStrTypeDict['status'], '')]
+    except:
+      # We had an error.  Format the exception and return it in the kString.
+      return [(nodeId, 1, kStrTypeDict['status'], format_exc('DefineFuncMod'))]
+  ENDEMBED; // DefineFuncModel
   /**
     * Return a JSON string representing the layers of the model.  Does not return any
     * compile information or trained weights.
@@ -384,7 +469,7 @@ EXPORT Keras := MODULE
               UNSIGNED4 seqId,
               UNSIGNED4 epoch,
               UNSIGNED modelid = 0) :=
-              EMBED(Python: globalscope(globalScope), persist('query'), activity)
+            EMBED(Python: globalscope(globalScope), persist('query'), activity)
     import traceback as tb
     import tensorflow as tf
     import numpy as np
@@ -404,22 +489,24 @@ EXPORT Keras := MODULE
       # Convert the incoming weights to a list of numpy arrays
       wA = Tens2NpList(weights)
       # Convert the X tensor to a numpy array
-      xAL = Tens2NpList(x)
+      xAL = Tens2NpList(x, recordOriented = True)
       # Convert the Y tensor to a numpy array
-      yAL = Tens2NpList(y)
-      # Do some error checking.
+      yAL = Tens2NpList(y, recordOriented = True)
       if xAL and yAL and xAL[0].size > 0 and yAL[0].size > 0:
-        xA = xAL[0]
-        yA = yAL[0]
-        if xA.size == 0 or yA.size == 0 or xA.shape[0] != yA.shape[0]:
-          assert 1 == 0, 'Fit: X and Y sizes do not match or are zero: xShape = ' + str(xA.shape) + ', yShape = ' + str(yA.shape)
+        # We've got some data
+        # Do some error checking.
+        for i in range(len(xAL)):
+          xA = xAL[i]
+          yA = yAL[i]
+          if xA.size == 0 or yA.size == 0 or xA.shape[0] != yA.shape[0]:
+            assert 1 == 0, 'Fit: X and Y sizes do not match or are zero: xShape = ' + str(xA.shape) + ', yShape = ' + str(yA.shape)
         # More Keras TF context restoration
         with tfSession.as_default():
           with tfSession.graph.as_default():
             # Set the starting weights
             mod.set_weights(wA)
             # Run one batch to fit the model
-            tfHistory = mod.fit(xA, yA, epochs=epoch, batch_size=32, initial_epoch=epoch-1, shuffle=False, steps_per_epoch = 1)
+            tfHistory = mod.fit(xAL, yAL, epochs=epoch, batch_size=32, initial_epoch=epoch-1, shuffle=False, steps_per_epoch = 1)
             # Update the cumulative (epoch) loss
             currLoss = tfHistory.history['loss'][-1]
             cumLoss[modelid] += currLoss
@@ -438,7 +525,7 @@ EXPORT Keras := MODULE
     except:
       # Error occurred, but no string returned.  So we do an assert to convey the error.
       assert 1 == 0, format_exc('FitBatch')
-  ENDEMBED;
+  ENDEMBED; // FitBatch
   /**
     * Get the current epoch's accumulated average loss up to this point.
     */
@@ -465,72 +552,134 @@ EXPORT Keras := MODULE
               UNSIGNED4 seqId,
               UNSIGNED modelid = 0) :=
               EMBED(Python: globalscope(globalScope), persist('query'), activity)
-    mod = modcache[modelid]
-    # Convert x data to a numpy array
-    xA = Tens2NpList(x)
-    # Convert y data to a numpy array
-    yA = Tens2NpList(y)
-    outRecs = []
-    # Restore Keras / TF context
-    with tfSession.as_default():
-      with tfSession.graph.as_default():
-        # Evaluate the Keras model
-        metrics = mod.evaluate(xA, yA)
-        # Get the name for each metric
-        mNames = mod.metrics_names
-        for i in range(len(metrics)):
-          # Return the name and value for each defined metric.
-          rec = (i, mNames[i], float(metrics[i]))
-          outRecs.append(rec)
-    return outRecs
+    try:
+      mod = modcache[modelid]
+      # Convert x data to a numpy array
+      xA = Tens2NpList(x, recordOriented = True)
+      # Convert y data to a numpy array
+      yA = Tens2NpList(y, recordOriented = True)
+      outRecs = []
+      # Restore Keras / TF context
+      with tfSession.as_default():
+        with tfSession.graph.as_default():
+          # Evaluate the Keras model
+          metrics = mod.evaluate(xA, yA)
+          # Get the name for each metric
+          mNames = mod.metrics_names
+          for i in range(len(metrics)):
+            # Return the name and value for each defined metric.
+            rec = (i, mNames[i], float(metrics[i]))
+            outRecs.append(rec)
+      return outRecs
+    except:
+      # Error occurred, but no string returned.  So we do an assert to convey the error.
+      assert 1 == 0, format_exc('Evaluate')
   ENDEMBED;
   /**
     * Use the Keras model to predict the output for a set
     * of independent (x) data.
     */
-  EXPORT STREAMED DATASET(t_Tensor) Predict(
-              STREAMED DATASET(t_Tensor) xDat,
-              UNSIGNED4 seqId,
-              UNSIGNED modelid = 0) :=
-              EMBED(Python: globalscope(globalScope), persist('query'), activity)
-    import numpy as np
-    import traceback as tb
-    try:
-      def predGen():
-        # We need to process the data one slice at a time, so that we can emit
-        # slices with the proper wi and sliceId so that the record indexes line up
-        # between the supplied x and the returned predictions.
-        outSlices = []
-        for slice in xDat:
-          # Convert one slice to numpy array format.
-          xA = Tens2Np([slice])
-          node, wi, sliceId, shape, dataType, maxSliceSize, slice_size, \
-                    densedat, sparsedat = slice
-          # Restore keras / tf context
-          with tfSession.as_default():
-            with tfSession.graph.as_default():
-              predA = mod.predict(xA)
-          preds = []
-          # We need to derive the max slice size from the ratio of record sizes
-          xSize = np.prod(shape[1:])
-          ySize = np.prod(predA.shape[1:])
-          newMaxSize = int(maxSliceSize * ySize / xSize)
-          # Results should be a single slice, but is returned as a list from Np2Tens(...).
-          for s in Np2Tens(predA, maxSliceOverride=newMaxSize):
-            preds.append(s)
-          pred = preds[0]
-          # Apply the wi and sliceId of the original x data to the predictions
-          y = (node, wi, sliceId, pred[3], pred[4], pred[5], pred[6], pred[7], pred[8])
-          # Yield the output slice.
-          yield y
-        return
-      mod = modcache[modelid]
-      return predGen()
-    except:
-      # An error occurred during Predict.
-      assert 0 == 1, 'Keras Predict error: ' + format_exc('Predict')
-      return []
-  ENDEMBED;
+  EXPORT DATASET(t_Tensor) Predict(
+            DATASET(t_Tensor) xDat,
+            UNSIGNED4 seqId,
+            UNSIGNED modelId) := FUNCTION
+      STREAMED DATASET(t_Tensor) Predict2(
+                STREAMED DATASET(t_Tensor) x_dat,
+                UNSIGNED4 seq_id,
+                UNSIGNED model_id) :=
+                      EMBED(Python: globalscope(globalScope), persist('query'), activity)
+        import numpy as np
+        import traceback as tb
+        # Generator function for producing the predictions
+        def predGen(mod):
+          try:
+            # We need to process the data one slice at a time, so that we can emit
+            # slices with the proper wi and sliceId so that the record indexes line up
+            # between the supplied x and the returned predictions.
+            xAL = [] # X array list accumulates wi's for each sliceId
+            currSlice = 0
+            maxRecs = 0  # Should be the same for each wi across all slices
+            # process all the wi's for each sliceId.  Inputs should be aligned at this point.
+            # and sorted by sliceId, wi.
+            for slice in x_dat:
+              node, wi, sliceId, shape, dataType, maxSliceSize, slice_size, \
+                        densedat, sparsedat = slice
+              # Calculate the maximum number of records per slice.  This only needs to be
+              #  done for the first slice and wi, since it should be consistent for aligned
+              #  tensors
+              if maxRecs == 0:
+                recSize = np.prod(shape[1:])
+                maxRecs = int(maxSliceSize / recSize)
+              if sliceId != currSlice:
+                # Got the next slice.  Now we should have all the wi's for the previous slice.
+                # Process the full slice.
+                if xAL:
+                  # We have a slice accumulated.
+                  # Process it.
+                  # Restore keras / tf context
+                  with tfSession.as_default():
+                    with tfSession.graph.as_default():
+                      predA = mod.predict(xAL, steps=1)
+                  for i in range(len(predA)):
+                    sliceA = predA[i]
+                    recSize = int(np.prod(sliceA.shape[1:]))
+                    newMaxSize = maxRecs * recSize
+                    # Np2Tens will set the sliceId to 1 since it's the only slice.
+                    # so we need to set the sliceId back to the original
+                    for s in Np2Tens(sliceA, wi=i+1, maxSliceOverride=newMaxSize):
+                      # Should only be one slice since we forced the maxSliceOverride
+                      # but it's a generator, so we need to do for loop.
+                      s = s[:2] + (currSlice,) + s[3:]
+                      yield s
+                  # Now clear the accumultor
+                  xAL = []
+                currSlice = sliceId
+              # Convert the slice to a numpy array and add it to the accumulator
+              # Force the sliceId to 1 to handle this slice as standalone
+              sliceAdj = [node, wi, 1, shape, dataType, maxSliceSize, slice_size, densedat, sparsedat]
+              xA = Tens2Np([sliceAdj], recordOriented = True)
+              xAL.append(xA)
+              # END for slice in x_dat
+            # Process the last sliceId
+            if xAL:
+              # Restore keras / tf context
+              with tfSession.as_default():
+                with tfSession.graph.as_default():
+                  predA = mod.predict(xAL, steps=1)
+              for i in range(len(predA)):
+                sliceA = predA[i]
+                recSize = int(np.prod(sliceA.shape[1:]))
+                newMaxSize = maxRecs * recSize
+                # Np2Tens will set the sliceId to 1 since it's the only slice.
+                # so we need to set the sliceId back to the original
+                for s in Np2Tens(sliceA, wi=i+1, maxSliceOverride=newMaxSize):
+                  # Should only be one slice since we forced the maxSliceOverride
+                  # but it's a generator, so we need to do for loop.
+                  s = s[:2] + (currSlice,) + s[3:]
+                  yield s
+            return
+          except:
+            # An error occured during predGen()
+            assert 0 == 1, format_exc('Predict2 -- predGen')
+        # END predGen()
+        try:
+          # Get the model
+          mod = modcache[model_id]
+          # Return the generator that will produce the output Tensor list
+          return predGen(mod)
+        except:
+          # An error occurred during Predict.
+          assert 0 == 1, format_exc('Predict2')
+          return []
+      ENDEMBED; // Predict2
+    // Sort Xdat by sliceId and then by wi so that we can present the model with all
+    // inputs (i.e. wi's) at once.
+    xDatS := SORT(xDat, sliceId, wi, LOCAL);
+    preds := predict2(xDatS, seqId, modelId);
+    // Now re-sort into the cannonical order
+    predsS := SORT(preds, wi, sliceId, LOCAL);
+    RETURN predsS;
+  END; // Predict
   /**
     * Shutdown the Keras Interface and free up all global memory fields.
     * This leaves behind, at most, a small memory footprint that should
