@@ -22,118 +22,14 @@ TensData := Tensor.R4.TensData;
   */
 EXPORT Image := MODULE
 
-  /** This record stores the MNIST images as per their index. Helps for maintaining the images and is simple to convert.
-    * @field id Index of the image which can also act as an identification factor for the image.
-    * @field image Image stored as an array of bytes which can be converted into integers or real values for using with neural networks.
-    */
-  SHARED MNIST_images := RECORD
-    UNSIGNED id;
-    DATA image;
-  END;
-
-  /** This record stores the MNIST labels for testing models with MNIST images. A label is 1 byte unsigned integer.
+  /** This record stores the Image labels for testing models with images. A label is 1 byte unsigned integer.
+    * Mostly used for MNIST dataset.
     * @field id Index of the label, so that index of image may be matched
     * @field label Label stored as a number to be used conveniently
     */
-  SHARED MNIST_labels := RECORD
+  SHARED IMG_labels := RECORD
     UNSIGNED id;
     UNSIGNED1 label;
-  END;
-
-  /** This function converts a compressed unsigned byte file, MNIST train images into a record for suitable input
-    * It takes either a logical file directly given the path or a logical file sprayed as a BLOB. Bytes are manipulated to convert the file into images.  
-    * @param filename A string which would hold the filename for the logical file name or the landing zone file.  
-    * @return A dataset of images from the file in the form of MNIST_images record
-    */
-  EXPORT DATASET(MNIST_images) MNIST_train_images(STRING filename) := FUNCTION
-    MNIST_FORMAT := RECORD
-        DATA4 magic;
-        DATA4 numImages;
-        DATA4 numRows;
-        DATA4 numCols;
-        DATA47040000 contents;
-    END;
-
-    mnist_imgs := DATASET(filename, MNIST_FORMAT, FLAT);
-    imgSize := (>UNSIGNED1<)mnist_imgs[1].numRows[4] * (>UNSIGNED1<)mnist_imgs[1].numCols[4];
-    numImages := (>UNSIGNED2<) (mnist_imgs[1].numImages[4] + mnist_imgs[1].numImages[3]);
-
-    mnistOut := NORMALIZE(mnist_imgs[..numImages], numImages, TRANSFORM(MNIST_images,
-                                SELF.image := LEFT.contents[((COUNTER-1)*imgSize+1) .. (COUNTER*imgSize)],
-                                SELF.id := COUNTER));
-
-    outRecs := DISTRIBUTE(mnistOut,id); 
-    RETURN outRecs;                            
-  END;
-
-  /** This function converts a compressed unsigned byte file, MNIST test images into a record for suitable input
-    * It takes either a logical file directly given the path or a logical file sprayed as a BLOB. Bytes are manipulated to convert the file into images.  
-    * @param filename A string which would hold the filename for the logical file name or the landing zone file.  
-    * @return A dataset of images from the file in the form of MNIST_images record
-    */
-  EXPORT DATASET(MNIST_images) MNIST_test_images(STRING filename) := FUNCTION
-    MNIST_FORMAT := RECORD
-        DATA4 magic;
-        DATA4 numImages;
-        DATA4 numRows;
-        DATA4 numCols;
-        DATA7840000 contents;
-    END;
-
-    mnist_imgs := DATASET(filename, MNIST_FORMAT, FLAT);
-    imgSize := (>UNSIGNED1<)mnist_imgs[1].numRows[4] * (>UNSIGNED1<)mnist_imgs[1].numCols[4];
-    numImages := (>UNSIGNED2<) (mnist_imgs[1].numImages[4] + mnist_imgs[1].numImages[3]);
-
-    mnistOut := NORMALIZE(mnist_imgs[..numImages], numImages, TRANSFORM(MNIST_images,
-                                SELF.image := LEFT.contents[((COUNTER-1)*imgSize+1) .. (COUNTER*imgSize)],
-                                SELF.id := COUNTER));
-
-    outRecs := DISTRIBUTE(mnistOut,id); 
-    RETURN outRecs;                            
-  END;
-
-  /** This function converts a compressed unsigned byte file, MNIST train labels into a record for suitable input
-    * It takes either a logical file directly given the path or a logical file sprayed as a BLOB. Bytes are manipulated to convert the file into labels.  
-    * @param filename A string which would hold the filename for the logical file name or the landing zone file.  
-    * @return A dataset of labels from the file in the form of MNIST_labels record
-    */
-  EXPORT DATASET(MNIST_labels) MNIST_train_labels(STRING filename) := FUNCTION
-    MNIST_FORMAT := RECORD
-        DATA4 magic;
-        DATA4 numImages;
-        DATA60000 contents;
-    END;
-
-    mnist_lbls := DATASET(filename,MNIST_FORMAT,FLAT);
-    numImages := (>UNSIGNED2<) (mnist_lbls[1].numImages[4] + mnist_lbls[1].numImages[3]);
-    mnistOut := NORMALIZE(mnist_lbls[..numImages], numImages, TRANSFORM(MNIST_labels, 
-                                        SELF.label := (>UNSIGNED1<)LEFT.contents[COUNTER],
-                                        SELF.id := COUNTER;));
-
-    outRecs := DISTRIBUTE(mnistOut,id);
-    RETURN outRecs;
-  END;
-
-  /** This function converts a compressed unsigned byte file, MNIST test labels into a record for suitable input
-    * It takes either a logical file directly given the path or a logical file sprayed as a BLOB. Bytes are manipulated to convert the file into labels.  
-    * @param filename A string which would hold the filename for the logical file name or the landing zone file.  
-    * @return A dataset of labels from the file in the form of MNIST_labels record
-    */
-  EXPORT DATASET(MNIST_labels) MNIST_test_labels(STRING filename) := FUNCTION
-    MNIST_FORMAT := RECORD
-        DATA4 magic;
-        DATA4 numImages;
-        DATA10000 contents;
-    END;
-
-    mnist_lbls := DATASET(filename,MNIST_FORMAT,FLAT);
-    numImages := (>UNSIGNED2<) (mnist_lbls[1].numImages[4] + mnist_lbls[1].numImages[3]);
-    mnistOut := NORMALIZE(mnist_lbls[..numImages], numImages, TRANSFORM(MNIST_labels, 
-                                        SELF.label := (>UNSIGNED1<)LEFT.contents[COUNTER],
-                                        SELF.id := COUNTER;));
-
-    outRecs := DISTRIBUTE(mnistOut,id);
-    RETURN outRecs;
   END;
 
   /** This record stores the images as per their index. Helps for maintaining the images and is simple to convert.
@@ -152,6 +48,109 @@ EXPORT Image := MODULE
   SHARED IMG_NUMERICAL := RECORD
     UNSIGNED8 id;
     DATA image;
+    SET OF UNSIGNED imgDims;
+  END;
+
+  /** This function converts a compressed unsigned byte file, MNIST train images into a record for suitable input
+    * It takes either a logical file directly given the path or a logical file sprayed as a BLOB. Bytes are manipulated to convert the file into images.  
+    * @param filename A string which would hold the filename for the logical file name or the landing zone file.  
+    * @return A dataset of images from the file in the form of IMG_NUMERICAL record
+    */
+  EXPORT DATASET(IMG_NUMERICAL) MNIST_train_images(STRING filename) := FUNCTION
+    MNIST_FORMAT := RECORD
+        DATA4 magic;
+        DATA4 numImages;
+        DATA4 numRows;
+        DATA4 numCols;
+        DATA47040000 contents;
+    END;
+
+    mnist_imgs := DATASET(filename, MNIST_FORMAT, FLAT);
+    numRows := (>UNSIGNED1<)mnist_imgs[1].numRows[4];
+    numCols := (>UNSIGNED1<)mnist_imgs[1].numCols[4];
+    imgSize := numRows*numCols;
+    numImages := (>UNSIGNED2<) (mnist_imgs[1].numImages[4] + mnist_imgs[1].numImages[3]);
+
+    mnistOut := NORMALIZE(mnist_imgs[..numImages], numImages, TRANSFORM(IMG_NUMERICAL,
+                                SELF.image := LEFT.contents[((COUNTER-1)*imgSize+1) .. (COUNTER*imgSize)],
+                                SELF.id := COUNTER,
+                                SELF.imgDims := [numRows, numCols, 1]));
+
+    outRecs := DISTRIBUTE(mnistOut,id); 
+    RETURN outRecs;                            
+  END;
+
+  /** This function converts a compressed unsigned byte file, MNIST test images into a record for suitable input
+    * It takes either a logical file directly given the path or a logical file sprayed as a BLOB. Bytes are manipulated to convert the file into images.  
+    * @param filename A string which would hold the filename for the logical file name or the landing zone file.  
+    * @return A dataset of images from the file in the form of IMG_NUMERICAL record
+    */
+  EXPORT DATASET(IMG_NUMERICAL) MNIST_test_images(STRING filename) := FUNCTION
+    MNIST_FORMAT := RECORD
+        DATA4 magic;
+        DATA4 numImages;
+        DATA4 numRows;
+        DATA4 numCols;
+        DATA7840000 contents;
+    END;
+
+    mnist_imgs := DATASET(filename, MNIST_FORMAT, FLAT);
+    numRows := (>UNSIGNED1<)mnist_imgs[1].numRows[4];
+    numCols := (>UNSIGNED1<)mnist_imgs[1].numCols[4];
+    imgSize := numRows*numCols;
+    numImages := (>UNSIGNED2<) (mnist_imgs[1].numImages[4] + mnist_imgs[1].numImages[3]);
+
+    mnistOut := NORMALIZE(mnist_imgs[..numImages], numImages, TRANSFORM(IMG_NUMERICAL,
+                                SELF.image := LEFT.contents[((COUNTER-1)*imgSize+1) .. (COUNTER*imgSize)],
+                                SELF.id := COUNTER,
+                                SELF.imgDims := [numRows, numCols, 1]));
+
+    outRecs := DISTRIBUTE(mnistOut,id); 
+    RETURN outRecs;                            
+  END;
+
+  /** This function converts a compressed unsigned byte file, MNIST train labels into a record for suitable input
+    * It takes either a logical file directly given the path or a logical file sprayed as a BLOB. Bytes are manipulated to convert the file into labels.  
+    * @param filename A string which would hold the filename for the logical file name or the landing zone file.  
+    * @return A dataset of labels from the file in the form of IMG_labels record
+    */
+  EXPORT DATASET(IMG_labels) MNIST_train_labels(STRING filename) := FUNCTION
+    MNIST_FORMAT := RECORD
+        DATA4 magic;
+        DATA4 numImages;
+        DATA60000 contents;
+    END;
+
+    mnist_lbls := DATASET(filename,MNIST_FORMAT,FLAT);
+    numImages := (>UNSIGNED2<) (mnist_lbls[1].numImages[4] + mnist_lbls[1].numImages[3]);
+    mnistOut := NORMALIZE(mnist_lbls[..numImages], numImages, TRANSFORM(IMG_labels, 
+                                        SELF.label := (>UNSIGNED1<)LEFT.contents[COUNTER],
+                                        SELF.id := COUNTER;));
+
+    outRecs := DISTRIBUTE(mnistOut,id);
+    RETURN outRecs;
+  END;
+
+  /** This function converts a compressed unsigned byte file, MNIST test labels into a record for suitable input
+    * It takes either a logical file directly given the path or a logical file sprayed as a BLOB. Bytes are manipulated to convert the file into labels.  
+    * @param filename A string which would hold the filename for the logical file name or the landing zone file.  
+    * @return A dataset of labels from the file in the form of IMG_labels record
+    */
+  EXPORT DATASET(IMG_labels) MNIST_test_labels(STRING filename) := FUNCTION
+    MNIST_FORMAT := RECORD
+        DATA4 magic;
+        DATA4 numImages;
+        DATA10000 contents;
+    END;
+
+    mnist_lbls := DATASET(filename,MNIST_FORMAT,FLAT);
+    numImages := (>UNSIGNED2<) (mnist_lbls[1].numImages[4] + mnist_lbls[1].numImages[3]);
+    mnistOut := NORMALIZE(mnist_lbls[..numImages], numImages, TRANSFORM(IMG_labels, 
+                                        SELF.label := (>UNSIGNED1<)LEFT.contents[COUNTER],
+                                        SELF.id := COUNTER;));
+
+    outRecs := DISTRIBUTE(mnistOut,id);
+    RETURN outRecs;
   END;
 
   /** This function takes a logical file where multiple images may be sprayed as a blob with the prefix:[filename,filesize].
@@ -159,33 +158,47 @@ EXPORT Image := MODULE
     * @param filename String containing the logical file of the image dataset
     * @return IMG_NUMERICAL dataset which can be converted to Tensor easily using a conversion function 
     */
-  EXPORT DATASET(IMG_NUMERICAL) GetImages(STRING filename) := FUNCTION
-    imageData := DATASET(filename, IMG_FORMAT, FLAT);
-    numImages := COUNT(imageData);
+  EXPORT DATASET(IMG_NUMERICAL) GetImages(STRING filename, SET OF UNSIGNED dims, BOOLEAN resize = TRUE) := FUNCTION
+    DATA ReadImage(DATA image, SET OF UNSIGNED dims, BOOLEAN resize) := EMBED(Python)
+      import cv2
+      import numpy as np
+      image_np = np.frombuffer(image, dtype='uint8')
+      img = cv2.imdecode(image_np,cv2.IMREAD_UNCHANGED)
+      dims = tuple(dims)
+      if resize:
+        img = cv2.resize(img, dims)
+      else:
+        y,x,_ = img.shape
+        h,k = dims
+        img = img[int((y-k)/2):int((y+k)/2), int((x-h)/2):int((x+h)/2)]
+      return bytearray(img)
+    ENDEMBED;
 
-    imageNumerical := NORMALIZE(imageData, numImages, TRANSFORM(IMG_NUMERICAL,
-                                                    SELF.id := COUNTER,
-                                                    SELF.image := LEFT.image
-                                                    ));
+    SET OF INTEGER GetImageDimensions(DATA image) := EMBED(Python)
+        import cv2
+        import numpy as np 
+
+        nparr = np.frombuffer(bytearray(image), dtype='uint8')
+        img_np = cv2.imdecode(nparr,cv2.IMREAD_UNCHANGED)
+        if len(img_np.shape) == 2:
+          dims = list(img_np.shape)
+          dims.append(1)
+        else:
+          dims = list(img_np.shape)  
+        return dims;
+    ENDEMBED;
+
+    imageData := DATASET(filename, IMG_FORMAT, FLAT);
+    imgDims := dims + [GetImageDimensions(imageData[1].image)[3]];
+
+    imageNumerical := PROJECT(imageData, TRANSFORM(IMG_NUMERICAL,
+                                          SELF.id := COUNTER,
+                                          SELF.image := ReadImage(LEFT.image, dims, resize),
+                                          SELF.imgDims := imgDims
+                                          ));
 
     return imageNumerical;
   END;
-
-  /** This function converts an MNIST_Images record format to TensData format so that it can be passed into makeTensor
-    * This makes it much easier to give image datasets as input to neural networks
-    * @param imgDataset The dataset of MNIST images which need to be converted to Tensor Data format
-    * @return Tensor data of the images so as to send to the makeTensor with ease
-    */
-  EXPORT DATASET(Tensdata) MNISTtoTens(DATASET(MNIST_Images) imgDataset) := FUNCTION
-    imgRows := 28;
-    imgCols := 28;
-    imgSize := imgRows * imgCols;
-    
-    tens := NORMALIZE(imgDataset, imgSize, TRANSFORM(TensData,
-                        SELF.indexes := [LEFT.id, (COUNTER-1) DIV imgCols+1, (COUNTER-1) % imgCols +1, 1],
-                        SELF.value := ( (REAL) (>UNSIGNED1<) LEFT.image[counter] )/127.5 - 1 ));
-    RETURN tens;
-  END;    
 
   /** This function converts an IMG_Numerical record format to TensData format so that it can be passed into makeTensor
     * This makes it much easier to give image datasets as input to neural networks
@@ -194,17 +207,7 @@ EXPORT Image := MODULE
     * @return Tensor data of the images so as to send to the makeTensor with ease
     */
   EXPORT DATASET(TensData) ImgtoTens(DATASET(IMG_NUMERICAL) imgDataset) := FUNCTION
-    SET OF INTEGER GetImageDimensions(DATA image) := EMBED(Python)
-        import cv2
-        import numpy as np 
-
-        nparr = np.frombuffer(bytes(image), np.uint8)
-        img_np = cv2.imdecode(nparr)
-
-        return list(img_np.shape);
-    ENDEMBED;
-
-    imgShape := GetImageDimensions(imgDataset[1].image);
+    imgShape := imgDataset[1].imgDims;
 
     imgRows := imgShape[1];
     imgCols := imgShape[2];
@@ -229,10 +232,13 @@ EXPORT Image := MODULE
     ENDEMBED;
 
     numImages := MAX(tens, tens.indexes[1]);
+    numRows := MAX(tens, tens.indexes[2]);
+    numCols := MAX(tens, tens.indexes[3]);
+    numChannels := MAX(tens, tens.indexes[4]);
     imageDataset := DATASET(numImages,TRANSFORM(IMG_NUMERICAL,
                         SELF.id := COUNTER,
-                        SELF.image := giveBytes(SET(tens(indexes[1]=COUNTER),(UNSIGNED)((value+1)*127.5))) ));
-
+                        SELF.image := giveBytes(SET(tens(indexes[1]=COUNTER),(UNSIGNED)((value+1)*127.5))),
+                        SELF.imgDims := [numRows, numCols, numChannels]));
     RETURN imageDataset;                    
   END;
 
@@ -241,20 +247,21 @@ EXPORT Image := MODULE
     * @param mnist Take the image dataset of mnist images to convert to JPG images
     * @return Image dataset having encoded JPG in bytearray of Images
     */
-  EXPORT DATASET(IMG_FORMAT) OutputasJPG(DATASET(MNIST_Images) mnist) := FUNCTION
-    DATA makeJPG(DATA image) := EMBED(Python)
+  EXPORT DATASET(IMG_FORMAT) OutputasJPG(DATASET(IMG_NUMERICAL) mnist) := FUNCTION
+    DATA makeJPG(DATA image, SET OF UNSIGNED dims) := EMBED(Python)
         import numpy as np
         import cv2
 
+        dims = dims[:2]
         image_np = np.frombuffer(image, dtype=np.uint8)
-        image_mat = image_np.reshape((28,28))
+        image_mat = image_np.reshape(dims)
         img_encode = cv2.imencode('.jpg', image_mat)[1]
         return bytearray(img_encode)
     ENDEMBED;
 
     mnist_jpg := PROJECT(mnist, TRANSFORM(IMG_FORMAT,
                         SELF.filename := LEFT.id + '_mnist.jpg';
-                        SELF.image := makeJPG(LEFT.image);
+                        SELF.image := makeJPG(LEFT.image, LEFT.imgDims);
                         ));
     return mnist_jpg;                    
   END;
@@ -264,20 +271,21 @@ EXPORT Image := MODULE
     * @param mnist Take the image dataset of mnist images to convert to PNG images
     * @return Image dataset having encoded PNG in bytearray of Images
     */
-  EXPORT DATASET(IMG_FORMAT) OutputasPNG(DATASET(MNIST_Images) mnist) := FUNCTION
-    DATA makePNG(DATA image) := EMBED(Python)
+  EXPORT DATASET(IMG_FORMAT) OutputasPNG(DATASET(IMG_NUMERICAL) mnist) := FUNCTION
+    DATA makePNG(DATA image, SET OF UNSIGNED dims) := EMBED(Python)
         import numpy as np
         import cv2
 
+        dims = dims[:2]
         image_np = np.frombuffer(image, dtype=np.uint8)
-        image_mat = image_np.reshape((28,28))
+        image_mat = image_np.reshape(dims)
         img_encode = cv2.imencode('.png', image_mat)[1]
         return bytearray(img_encode)
     ENDEMBED;
 
     mnist_png := PROJECT(mnist, TRANSFORM(IMG_FORMAT,
                         SELF.filename := LEFT.id + '_mnist.png';
-                        SELF.image := makePNG(LEFT.image);
+                        SELF.image := makePNG(LEFT.image, LEFT.imgDims);
                         ));
     return mnist_png;                    
   END;
@@ -290,19 +298,20 @@ EXPORT Image := MODULE
     * @param epochnum Number of epochs the dataset was trained for. This is only used for name of the image.
     * @return Dataset of 1 image which contains a PNG file with the resultant images in a grid
     */
-  EXPORT DATASET(IMG_FORMAT) OutputGrid(DATASET(MNIST_Images) mnist, INTEGER r, INTEGER c, INTEGER epochnum = 1) := FUNCTION
-    DATA makeGrid(SET OF DATA images, Integer r, Integer c) := EMBED(Python)
+  EXPORT DATASET(IMG_FORMAT) OutputGrid(DATASET(IMG_NUMERICAL) mnist, INTEGER r, INTEGER c, INTEGER epochnum = 1) := FUNCTION
+    DATA makeGrid(SET OF DATA images, Integer r, Integer c, SET OF UNSIGNED dims) := EMBED(Python)
         import matplotlib.pyplot as plt
         import numpy as np
         import cv2
 
+        dims = dims[:2]
         fig, axs = plt.subplots(r, c)
         cnt = 0
         for i in range(r):
             for j in range(c):
                 image = images[cnt]
                 image_np = np.frombuffer(image, dtype=np.uint8)
-                image_mat = image_np.reshape((28,28))
+                image_mat = image_np.reshape(dims)
                 axs[i,j].imshow(image_mat[:,:], cmap='gray')
                 axs[i,j].axis('off')
                 cnt += 1
@@ -316,7 +325,7 @@ EXPORT Image := MODULE
 
     mnist_grid := DATASET(1, TRANSFORM(IMG_FORMAT,
                         SELF.filename := 'Epoch_'+epochnum+'.png',
-                        SELF.image := makeGrid(SET(mnist, image), r, c)
+                        SELF.image := makeGrid(SET(mnist, image), r, c, mnist[1].ImgDims)
                         ));
     return mnist_grid;    
   END;
