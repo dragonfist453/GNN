@@ -54,6 +54,8 @@ EXPORT Keras := MODULE
       # Initialize global variables
       global modcache
       modcache = {}
+      global sesscache
+      sesscache = {}
       global nextModId
       nextModId = 0
       # The following 3 variables are for record keeping on each model.
@@ -195,16 +197,16 @@ EXPORT Keras := MODULE
           assert 1 == 0, format_exc('NP2Tens')
       Np2Tens = _Np2Tens
       global NpList2Tens
-      # Convert an ECL tensor list dataset into a list of numpy ndarrays.
-      # The wi field is used to distinguish the tensors in the list.
+      # Convert a list of numpy ndarrays into an ECL tensor dataset.  Uses wi's to
+      # distinguish the multiple tensors in the same dataset.
       def _NpList2Tens(alist):
         for i in range(len(alist)):
           for rec in Np2Tens(alist[i], i+1):
             yield rec
       NpList2Tens = _NpList2Tens
       global Tens2NpList
-      # Convert a list of numpy ndarrays into an ECL tensor dataset.  Uses wi's to
-      # distinguish the multiple tensors in the same dataset.
+      # Convert an ECL tensor list dataset into a list of numpy ndarrays.
+      # The wi field is used to distinguish the tensors in the list.
       def _Tens2NpList(tens, recordOriented = False):
         npList = []
         slices = []
@@ -225,15 +227,21 @@ EXPORT Keras := MODULE
     # Only define the globals once, no matter how many times Init gets called.
     # Use the model cache (modcache) as a flag to determine if we've already
     # initialized.
-    #try:
-    #  mc = modcache
-    #except:
-      # modcache doesn't exist.  Do the initialization.
+    import threading
+    global threadlock
+    threadlock = threading.Lock()
+    threadlock.acquire()
     try:
-      initGlobals()
+      mc = modcache
     except:
-      # We had an exception.  Format and return it.
-      return [(nodeId, 1,4,tb.format_exc('Init'))]
+      # modcache doesn't exist.  Do the initialization.
+      try:
+        initGlobals()
+      except:
+        # We had an exception.  Format and return it.
+        return [(nodeId, 1,4,tb.format_exc('Init'))]
+    finally:
+      threadlock.release()
     # Success.  Return blank status.
     return [(nodeId, 1, kStrTypeDict['status'], '')]
   ENDEMBED; // Init()
@@ -248,17 +256,20 @@ EXPORT Keras := MODULE
     import traceback as tb
     import tensorflow as tf
     from tensorflow.keras import layers
-    global tfSession
     global nextModId
     try:
       # Allocate a new modelId
+      # Make sure we do it atomically to avoid conflict with
+      # another model running on another thread
+      threadlock.acquire()
       modId = nextModId
       nextModId += 1
       # Restore the keras / tensorflow context.  It sometimes gets lost between calls,
       # so we explicitly restore it before each call that uses it.
-      tfSession = tf.keras.backend.get_session()
-      with tfSession.as_default():
-        with tfSession.graph.as_default():
+      graph = tf.Graph()
+      with graph.as_default():
+        tfSession = tf.Session()
+        with tfSession.as_default():
           mod = tf.keras.Sequential()
           for rec in mdef:
             if rec[0] != nodeId:
@@ -279,11 +290,15 @@ EXPORT Keras := MODULE
           mod.set_weights(w)
           # Add this model to the model cache
           modcache[modId] = mod
+          # And the session to the sesscache
+          sesscache[modId] = tfSession
       # We succeeded.  Return a blank status to indicate success.
       return [(nodeId, modId, kStrTypeDict['status'], '')]
     except:
       # We had an error.  Format the exception and return it in the kString
       return [(nodeId, 1, kStrTypeDict['status'], format_exc('DefineMod'))]
+    finally:
+      threadlock.release()
   ENDEMBED; // DefineModel
   /** Function to Define a Functional (i.e. Non-Sequential) model and (optionally)
     * compile the model.
@@ -300,19 +315,23 @@ EXPORT Keras := MODULE
     import traceback as tb
     import tensorflow as tf
     from tensorflow.keras import layers
-    global tfSession
     global nextModId
     try:
       # Allocate a new modelId
+      # Make sure we do it atomically to avoid conflict with
+      # another model running on another thread
+      threadlock.acquire()
       modId = nextModId
       nextModId += 1
-      # Restore the keras / tensorflow context.  It sometimes gets lost between calls,
-      # so we explicitly restore it before each call that uses it.
-      tfSession = tf.keras.backend.get_session()
+      threadlock.release()
       layerDict = {} # Temporary dictionary for keeping track of layers.
       predDict = {} # Temporary dict for keeping track of predecessors.
-      with tfSession.as_default():
-        with tfSession.graph.as_default():
+      # Restore the keras / tensorflow context.  It sometimes gets lost between calls,
+      # so we explicitly restore it before each call that uses it.
+      graph = tf.Graph()
+      with graph.as_default():
+        tfSession = tf.Session()
+        with tfSession.as_default():
           # Do two passes through the ldefs so that order of layers won't matter
           for rec in ldefs:
             lName, ldef, preds = rec
@@ -354,6 +373,8 @@ EXPORT Keras := MODULE
           mod.set_weights(w)
           # Add this model to the model cache
           modcache[modId] = mod
+          # And the session to the session cache
+          sesscache[modId] = tfSession
       # We succeeded.  Return a blank status to indicate success.
       return [(nodeId, modId, kStrTypeDict['status'], '')]
     except:
@@ -369,8 +390,12 @@ EXPORT Keras := MODULE
               EMBED(Python: globalscope(globalScope), persist('query'), activity)
     try:
       mod = modcache[modelid]
+      tfSession = sesscache[modelid]
+      with tfSession.as_default():
+        with tfSession.graph.as_default():
+          js = mod.to_json()
       # Succeeded.  Return a blank status.
-      return [(nodeId, 1, kStrTypeDict['status'], mod.to_json())]
+      return [(nodeId, 1, kStrTypeDict['status'], js)]
     except:
       # Failed.  Forat an exception and send it.
       return [(nodeId, 1, 4, format_exc('ToJSON'))]
@@ -388,10 +413,15 @@ EXPORT Keras := MODULE
       for rec in ksjson:
         # Should only be one json kString record.
         json = rec[2]
-      mod = tf.keras.models.model_from_json(json)
+      graph = tf.Graph()
+      with graph.as_default():
+        tfSession = tf.Session()
+        with tfSession.as_default():
+           mod = tf.keras.models.model_from_json(json)
       modId = nextModId
       nextModId += 1
       modcache[modId] = mod
+      sesscache[modId] = tfSession
     except:
       # Error.  Return an exception string.
       return [(nodeId, 1, kStrTypeDict['status'], format_exc('FromJSON'))]
@@ -404,17 +434,19 @@ EXPORT Keras := MODULE
   EXPORT STREAMED DATASET(kString) CompileMod(STREAMED DATASET(kString) compilestr, UNSIGNED4 seqId,
                 UNSIGNED modelid = 0) := EMBED(Python: globalscope(globalScope), persist('query'), activity)
     import tensorflow as tf
-    tf.keras.backend.set_session(tfSession)
+    tfSession = sesscache[modelid]
     mod = modcache[modelid]
-    # Should only have one compilestr record per node
-    try:
-      cstr = 'EMPTY'
-      for rec in compilestr:
-        cstr = rec[2]
-      exec('mod.' + cstr)
-    except:
-      return [(nodeId, 1, kStrTypeDict['status'], format_exc('CompileMod'))]
-    return [(nodeId, 1, kStrTypeDict['status'], '')]
+    with tfSession.as_default():
+      with tfSession.graph.as_default():
+        # Should only have one compilestr record per node
+        try:
+          cstr = 'EMPTY'
+          for rec in compilestr:
+            cstr = rec[2]
+          exec('mod.' + cstr)
+        except:
+          return [(nodeId, 1, kStrTypeDict['status'], format_exc('CompileMod'))]
+        return [(nodeId, 1, kStrTypeDict['status'], '')]
   ENDEMBED;
   /**
     * Get the weights from the Keras / Tensorflow model.
@@ -424,15 +456,21 @@ EXPORT Keras := MODULE
                           STREAMED DATASET(kString) dummy, UNSIGNED4 seqId, UNSIGNED modelid = 0) :=
                             EMBED(Python: globalscope(globalScope), persist('query'), activity)
     import tensorflow as tf
-    # Restore the Keras / TF context.
-    tf.keras.backend.set_session(tfSession)
+    threadlock.acquire()
     try:
+      # Restore the Keras / TF context.
+      tfSession = sesscache[modelid]
       mod = modcache[modelid]
-      w = mod.get_weights()
+      with tfSession.as_default():
+        with tfSession.graph.as_default():
+          w = mod.get_weights()
       return NpList2Tens(w)
     except:
       # IF there was an error, return an empty dataset.
+      assert 1 == 0, format_exc('GetWeights modelId = ' + str(modelid))
       return []
+    finally:
+      threadlock.release()
   ENDEMBED;
   /**
     * Set the weights into the Keras / TF model.  The weights are sent as
@@ -443,12 +481,15 @@ EXPORT Keras := MODULE
     import tensorflow as tf
     import traceback as tb
     # Restore the Keras / TF context.
-    tf.keras.backend.set_session(tfSession)
+    tfSession = sesscache[modelid]
+    mod = modcache[modelid]
     try:
-      w = Tens2NpList(tens)
+      # Restore the Keras / TF context.
+      tfSession = sesscache[modelid]
       mod = modcache[modelid]
-      #w2 = mod.get_weights()
-      #mod.set_weights(w)
+      w = Tens2NpList(tens)
+      with tfSession.as_default():
+        mod.set_weights(w)
       outStr = ''
       # Success.  Return an empty status string.
       return [(nodeId, 1, 1, outStr)]
@@ -484,7 +525,6 @@ EXPORT Keras := MODULE
       batchCount[modelid] += 1
       wA_changes = []
       # Restore Keras / TF context
-      tf.keras.backend.set_session(tfSession)
       mod = modcache[modelid]
       # Convert the incoming weights to a list of numpy arrays
       wA = Tens2NpList(weights)
@@ -501,6 +541,7 @@ EXPORT Keras := MODULE
           if xA.size == 0 or yA.size == 0 or xA.shape[0] != yA.shape[0]:
             assert 1 == 0, 'Fit: X and Y sizes do not match or are zero: xShape = ' + str(xA.shape) + ', yShape = ' + str(yA.shape)
         # More Keras TF context restoration
+        tfSession = sesscache[modelid]
         with tfSession.as_default():
           with tfSession.graph.as_default():
             # Set the starting weights
@@ -560,6 +601,7 @@ EXPORT Keras := MODULE
       yA = Tens2NpList(y, recordOriented = True)
       outRecs = []
       # Restore Keras / TF context
+      tfSession = sesscache[modelid]
       with tfSession.as_default():
         with tfSession.graph.as_default():
           # Evaluate the Keras model
@@ -591,7 +633,7 @@ EXPORT Keras := MODULE
         import numpy as np
         import traceback as tb
         # Generator function for producing the predictions
-        def predGen(mod):
+        def predGen(mod, tfSession):
           try:
             # We need to process the data one slice at a time, so that we can emit
             # slices with the proper wi and sliceId so that the record indexes line up
@@ -646,6 +688,8 @@ EXPORT Keras := MODULE
               with tfSession.as_default():
                 with tfSession.graph.as_default():
                   predA = mod.predict(xAL, steps=1)
+              if type(predA) != type([]):
+                predA = [predA]
               for i in range(len(predA)):
                 sliceA = predA[i]
                 recSize = int(np.prod(sliceA.shape[1:]))
@@ -665,8 +709,9 @@ EXPORT Keras := MODULE
         try:
           # Get the model
           mod = modcache[model_id]
+          sess = sesscache[model_id]
           # Return the generator that will produce the output Tensor list
-          return predGen(mod)
+          return predGen(mod, sess)
         except:
           # An error occurred during Predict.
           assert 0 == 1, format_exc('Predict2')
@@ -696,6 +741,7 @@ EXPORT Keras := MODULE
       import traceback as tb
       global nodeId, nNodes, maxSliceLen
       global modcache
+      global sesscache
       global currEpoch
       global batchCount
       global cumLoss
@@ -720,6 +766,8 @@ EXPORT Keras := MODULE
         Tens2NpList = None
         NpList2Tens = None
         format_exc = None
+        del(modcache)
+        del(sesscache)
         del(nodeId)
         del(nNodes)
         del(maxSliceLen)
