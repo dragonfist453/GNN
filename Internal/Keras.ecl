@@ -48,18 +48,21 @@ EXPORT Keras := MODULE
       from tensorflow.keras import layers
       import numpy as np
       global nodeId, nNodes, maxSliceLen
-      # Extract the initialization parameters from initdata
+      # Initialize global variables
+      #   Extract the initialization parameters from initdata
       for rec in initdata:
         nodeId, nNodes, maxSliceLen = rec # Should only be one record
-      # Initialize global variables
+      #   Model cache indexed by model id.
       global modcache
       modcache = {}
+      #   Session cache indexed by model id.
       global sesscache
       sesscache = {}
+      #   The next model id to allocate
       global nextModId
       nextModId = 0
-      # The following 3 variables are for record keeping on each model.
-      # They are stored as a dictionary keyed by the model id.
+      #   The following 3 variables are for record keeping on each model.
+      #   They are stored as a dictionary keyed by the model id.
       global currEpoch
       currEpoch = {}
       global batchCount
@@ -67,16 +70,16 @@ EXPORT Keras := MODULE
       global cumLoss
       cumLoss = {}
       global kStrTypeDict
-      # kStrTypeDict needs to be kept in sync with Internal/Types.kStrType
-      # The kString type is used for several different purposes, and the type
-      # field indicates the meaning of a given string.
+      #   kStrTypeDict needs to be kept in sync with Internal/Types.kStrType
+      #   The kString type is used for several different purposes, and the type
+      #   field indicates the meaning of a given string.
       kStrTypeDict = {'layer':1, 'compile':2, 'json':3, 'status':4}
       global dTypeDict, dTypeDictR, DTypeSizeDict
-      # dTypeDict is used to convey the data type of a tensor.  It must be
-      # kept in sync with the Tensor data types in Tensor.ecl
+      #   dTypeDict is used to convey the data type of a tensor.  It must be
+      #   kept in sync with the Tensor data types in Tensor.ecl
       dTypeDict = {1:np.float32, 2:np.float64, 3:np.int32, 4:np.int64}
       dTypeDictR = {'float32':1, 'float64':2, 'int32':3, 'int64':4}
-      # Store the element size for each tensor data type.
+      #   Store the element size for each tensor data type.
       dTypeSizeDict = {1:4, 2:8, 3:4, 4:8}
       # Define some common functions
       global format_exc
@@ -150,6 +153,7 @@ EXPORT Keras := MODULE
           assert 1 == 0, format_exc('Tens2Np')
           return None
       Tens2Np = _Tens2Np
+
       # Convert a numpy ndarray into a Tensor dataset. Yield is used to
       # return one dataset record at a time.
       global Np2Tens
@@ -197,6 +201,7 @@ EXPORT Keras := MODULE
           assert 1 == 0, format_exc('NP2Tens')
       Np2Tens = _Np2Tens
       global NpList2Tens
+
       # Convert a list of numpy ndarrays into an ECL tensor dataset.  Uses wi's to
       # distinguish the multiple tensors in the same dataset.
       def _NpList2Tens(alist):
@@ -205,6 +210,7 @@ EXPORT Keras := MODULE
             yield rec
       NpList2Tens = _NpList2Tens
       global Tens2NpList
+
       # Convert an ECL tensor list dataset into a list of numpy ndarrays.
       # The wi field is used to distinguish the tensors in the list.
       def _Tens2NpList(tens, recordOriented = False):
@@ -229,18 +235,23 @@ EXPORT Keras := MODULE
     # initialized.
     import threading
     global threadlock
+    # Make sure we only intialize once.  Avoid reentrancy if called on multiple threads.
     threadlock = threading.Lock()
     threadlock.acquire()
     try:
-      mc = modcache
+      initGlobals()
     except:
       # modcache doesn't exist.  Do the initialization.
       try:
+        # Initialize globals and define commonly used functions so that
+        # they don't need to be repeated for each embed.
+        # Global references to each function are stored in the global namespace.
         initGlobals()
       except:
         # We had an exception.  Format and return it.
         return [(nodeId, 1,4,tb.format_exc('Init'))]
     finally:
+      # Always release the threadlock, success or fail.
       threadlock.release()
     # Success.  Return blank status.
     return [(nodeId, 1, kStrTypeDict['status'], '')]
@@ -264,8 +275,12 @@ EXPORT Keras := MODULE
       threadlock.acquire()
       modId = nextModId
       nextModId += 1
-      # Restore the keras / tensorflow context.  It sometimes gets lost between calls,
+      threadlock.release()
+      # Create a new keras / tensorflow context.  It sometimes gets lost between calls,
       # so we explicitly restore it before each call that uses it.
+      # Note that for each model, we create a new session and new graph under the hood.
+      # The graph is stored within the session, so only the session and model are stored,
+      # both by model id.
       graph = tf.Graph()
       with graph.as_default():
         tfSession = tf.Session()
@@ -290,7 +305,7 @@ EXPORT Keras := MODULE
           mod.set_weights(w)
           # Add this model to the model cache
           modcache[modId] = mod
-          # And the session to the sesscache
+          # And the session to the session cache
           sesscache[modId] = tfSession
       # We succeeded.  Return a blank status to indicate success.
       return [(nodeId, modId, kStrTypeDict['status'], '')]
@@ -326,8 +341,11 @@ EXPORT Keras := MODULE
       threadlock.release()
       layerDict = {} # Temporary dictionary for keeping track of layers.
       predDict = {} # Temporary dict for keeping track of predecessors.
-      # Restore the keras / tensorflow context.  It sometimes gets lost between calls,
+      # Create a new keras / tensorflow context.  It sometimes gets lost between calls,
       # so we explicitly restore it before each call that uses it.
+      # Note that for each model, we create a new session and new graph under the hood.
+      # The graph is stored within the session, so only the session and model are stored,
+      # both by model id.
       graph = tf.Graph()
       with graph.as_default():
         tfSession = tf.Session()
@@ -389,6 +407,7 @@ EXPORT Keras := MODULE
                   UNSIGNED modelid = 0) :=
               EMBED(Python: globalscope(globalScope), persist('query'), activity)
     try:
+      # Restore the keras / tensorflow context for this model.
       mod = modcache[modelid]
       tfSession = sesscache[modelid]
       with tfSession.as_default():
@@ -413,6 +432,7 @@ EXPORT Keras := MODULE
       for rec in ksjson:
         # Should only be one json kString record.
         json = rec[2]
+      # Restore the keras / tensorflow context for this model.
       graph = tf.Graph()
       with graph.as_default():
         tfSession = tf.Session()
@@ -434,6 +454,7 @@ EXPORT Keras := MODULE
   EXPORT STREAMED DATASET(kString) CompileMod(STREAMED DATASET(kString) compilestr, UNSIGNED4 seqId,
                 UNSIGNED modelid = 0) := EMBED(Python: globalscope(globalScope), persist('query'), activity)
     import tensorflow as tf
+    # Restore the keras / tensorflow context for this model.
     tfSession = sesscache[modelid]
     mod = modcache[modelid]
     with tfSession.as_default():
@@ -458,7 +479,7 @@ EXPORT Keras := MODULE
     import tensorflow as tf
     threadlock.acquire()
     try:
-      # Restore the Keras / TF context.
+      # Restore the keras / tensorflow context for this model.
       tfSession = sesscache[modelid]
       mod = modcache[modelid]
       with tfSession.as_default():
@@ -480,7 +501,7 @@ EXPORT Keras := MODULE
               UNSIGNED modelid = 0) := EMBED(Python: globalscope(globalScope), persist('query'), activity)
     import tensorflow as tf
     import traceback as tb
-    # Restore the Keras / TF context.
+    # Restore the keras / tensorflow context for this model.
     tfSession = sesscache[modelid]
     mod = modcache[modelid]
     try:
@@ -540,7 +561,7 @@ EXPORT Keras := MODULE
           yA = yAL[i]
           if xA.size == 0 or yA.size == 0 or xA.shape[0] != yA.shape[0]:
             assert 1 == 0, 'Fit: X and Y sizes do not match or are zero: xShape = ' + str(xA.shape) + ', yShape = ' + str(yA.shape)
-        # More Keras TF context restoration
+        # Restore the keras / tensorflow context for this model.
         tfSession = sesscache[modelid]
         with tfSession.as_default():
           with tfSession.graph.as_default():
@@ -600,7 +621,7 @@ EXPORT Keras := MODULE
       # Convert y data to a numpy array
       yA = Tens2NpList(y, recordOriented = True)
       outRecs = []
-      # Restore Keras / TF context
+      # Restore the keras / tensorflow context for this model.
       tfSession = sesscache[modelid]
       with tfSession.as_default():
         with tfSession.graph.as_default():
@@ -658,7 +679,7 @@ EXPORT Keras := MODULE
                 if xAL:
                   # We have a slice accumulated.
                   # Process it.
-                  # Restore keras / tf context
+                  # Restore the keras / tensorflow context for this model.
                   with tfSession.as_default():
                     with tfSession.graph.as_default():
                       predA = mod.predict(xAL, steps=1)
