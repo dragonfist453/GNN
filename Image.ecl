@@ -159,11 +159,14 @@ EXPORT Image := MODULE
     * @return IMG_NUMERICAL dataset which can be converted to Tensor easily using a conversion function 
     */
   EXPORT DATASET(IMG_NUMERICAL) GetImages(STRING filename, SET OF UNSIGNED dims, BOOLEAN resize = TRUE) := FUNCTION
-    DATA ReadImage(DATA image, SET OF UNSIGNED dims, BOOLEAN resize) := EMBED(Python)
+    DATA ReadImage(DATA image, SET OF UNSIGNED dims, BOOLEAN color, BOOLEAN resize) := EMBED(Python)
       import cv2
       import numpy as np
       image_np = np.frombuffer(image, dtype='uint8')
-      img = cv2.imdecode(image_np,cv2.IMREAD_UNCHANGED)
+      if color:
+        img = cv2.imdecode(image_np,cv2.IMREAD_COLOR)
+      else:
+        img = cv2.imdecode(image_np,cv2.IMREAD_GRAYSCALE)  
       dims = tuple(dims)
       if resize:
         img = cv2.resize(img, dims)
@@ -190,13 +193,13 @@ EXPORT Image := MODULE
 
     imageData := DATASET(filename, IMG_FORMAT, FLAT);
     imgDims := dims + [GetImageDimensions(imageData[1].image)[3]];
+    color := IF(imgDims[3] = 3, TRUE, FALSE);
 
     imageNumerical := PROJECT(imageData, TRANSFORM(IMG_NUMERICAL,
                                           SELF.id := COUNTER,
-                                          SELF.image := ReadImage(LEFT.image, dims, resize),
+                                          SELF.image := ReadImage(LEFT.image, dims, color,resize),
                                           SELF.imgDims := imgDims
                                           ));
-
     return imageNumerical;
   END;
 
@@ -247,7 +250,7 @@ EXPORT Image := MODULE
     * @param mnist Take the image dataset of mnist images to convert to JPG images
     * @return Image dataset having encoded JPG in bytearray of Images
     */
-  EXPORT DATASET(IMG_FORMAT) OutputasJPG(DATASET(IMG_NUMERICAL) mnist) := FUNCTION
+  EXPORT DATASET(IMG_FORMAT) OutputasJPG(DATASET(IMG_NUMERICAL) mnist, STRING filename = '') := FUNCTION
     DATA makeJPG(DATA image, SET OF UNSIGNED dims) := EMBED(Python)
         import numpy as np
         import cv2
@@ -260,7 +263,7 @@ EXPORT Image := MODULE
     ENDEMBED;
 
     mnist_jpg := PROJECT(mnist, TRANSFORM(IMG_FORMAT,
-                        SELF.filename := LEFT.id + '_mnist.jpg';
+                        SELF.filename := LEFT.id + filename + '.jpg';
                         SELF.image := makeJPG(LEFT.image, LEFT.imgDims);
                         ));
     return mnist_jpg;                    
@@ -271,7 +274,7 @@ EXPORT Image := MODULE
     * @param mnist Take the image dataset of mnist images to convert to PNG images
     * @return Image dataset having encoded PNG in bytearray of Images
     */
-  EXPORT DATASET(IMG_FORMAT) OutputasPNG(DATASET(IMG_NUMERICAL) mnist) := FUNCTION
+  EXPORT DATASET(IMG_FORMAT) OutputasPNG(DATASET(IMG_NUMERICAL) mnist, STRING filename = '') := FUNCTION
     DATA makePNG(DATA image, SET OF UNSIGNED dims) := EMBED(Python)
         import numpy as np
         import cv2
@@ -284,7 +287,7 @@ EXPORT Image := MODULE
     ENDEMBED;
 
     mnist_png := PROJECT(mnist, TRANSFORM(IMG_FORMAT,
-                        SELF.filename := LEFT.id + '_mnist.png';
+                        SELF.filename := LEFT.id + filename + '_mnist.png';
                         SELF.image := makePNG(LEFT.image, LEFT.imgDims);
                         ));
     return mnist_png;                    
@@ -298,23 +301,43 @@ EXPORT Image := MODULE
     * @param epochnum Number of epochs the dataset was trained for. This is only used for name of the image.
     * @return Dataset of 1 image which contains a PNG file with the resultant images in a grid
     */
-  EXPORT DATASET(IMG_FORMAT) OutputGrid(DATASET(IMG_NUMERICAL) mnist, INTEGER r, INTEGER c, INTEGER epochnum = 1) := FUNCTION
+  EXPORT DATASET(IMG_FORMAT) OutputGrid(DATASET(IMG_NUMERICAL) mnist, INTEGER r, INTEGER c, STRING filename) := FUNCTION
     DATA makeGrid(SET OF DATA images, Integer r, Integer c, SET OF UNSIGNED dims) := EMBED(Python)
         import matplotlib.pyplot as plt
         import numpy as np
         import cv2
 
-        dims = dims[:2]
+        numRows,numCols,_ = dims
+        dims = (numRows, numCols)
         fig, axs = plt.subplots(r, c)
         cnt = 0
-        for i in range(r):
+        if r == 1 and c == 1:
+          assert 1==0, 'Error: Grid of (1,1) not possible. Use OutputasPNG function instead!'
+        elif r == 1:
+          for i in range(c):
+            image = images[cnt]
+            image_np = np.frombuffer(image, dtype=np.uint8)
+            image_mat = image_np.reshape(dims)
+            axs[i].imshow(image_mat[:,:], cmap='gray')
+            axs[i].axis('off')
+            cnt += 1
+        elif c == 1:
+          for i in range(r):
+            image = images[cnt]
+            image_np = np.frombuffer(image, dtype=np.uint8)
+            image_mat = image_np.reshape(dims)
+            axs[i].imshow(image_mat[:,:], cmap='gray')
+            axs[i].axis('off')
+            cnt += 1
+        else:        
+          for i in range(r):
             for j in range(c):
-                image = images[cnt]
-                image_np = np.frombuffer(image, dtype=np.uint8)
-                image_mat = image_np.reshape(dims)
-                axs[i,j].imshow(image_mat[:,:], cmap='gray')
-                axs[i,j].axis('off')
-                cnt += 1
+              image = images[cnt]
+              image_np = np.frombuffer(image, dtype=np.uint8)
+              image_mat = image_np.reshape(dims)
+              axs[i,j].imshow(image_mat[:,:], cmap='gray')
+              axs[i,j].axis('off')
+              cnt += 1
         fig.canvas.draw()        
         image_from_plot = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
         image_from_plot = image_from_plot.reshape(fig.canvas.get_width_height()[::-1] + (3,))  
@@ -324,7 +347,7 @@ EXPORT Image := MODULE
     ENDEMBED;
 
     mnist_grid := DATASET(1, TRANSFORM(IMG_FORMAT,
-                        SELF.filename := 'Epoch_'+epochnum+'.png',
+                        SELF.filename := filename + '.png',
                         SELF.image := makeGrid(SET(mnist, image), r, c, mnist[1].ImgDims)
                         ));
     return mnist_grid;    
