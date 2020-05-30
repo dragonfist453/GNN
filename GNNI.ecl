@@ -345,7 +345,8 @@ EXPORT GNNI := MODULE
     */
   EXPORT UNSIGNED4 SetWeights(UNSIGNED4 model, DATASET(t_Tensor) weights) := FUNCTION
     kModelId := model DIV kerasIdFactor;
-    kstatus := ASSERT(Keras.SetWeights(weights, model, kModelId), LENGTH(text) = 0, 'SetWeights Exception: ' + text, FAIL);
+    weightsD := Tensor.R4.replicate(weights);
+    kstatus := ASSERT(Keras.SetWeights(weightsD, model, kModelId), LENGTH(text) = 0, 'SetWeights Exception: ' + text, FAIL);
     status := reduceResults(kstatus);
     mod :=  IF(LENGTH(status) = 0, getToken(model), 0);
     RETURN mod;

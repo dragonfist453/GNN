@@ -8,7 +8,8 @@ nNodes := Thorlib.nodes();
 
 t_Tensor := Tensor.R4.t_Tensor;
 
-MAX_SLICE := Tensor.MAX_SLICE;
+//MAX_SLICE := Tensor.MAX_SLICE;
+MAX_SLICE := POWER(2, 24);
 
 /**
   * This function is used by GNNI to pull local samples from the X and Y tensors.
@@ -24,7 +25,7 @@ EXPORT DATASET(t_Tensor) TensExtract(DATASET(t_Tensor) tens, UNSIGNED pos,
                                     UNSIGNED datcount) := FUNCTION
   // Python embed function to do most of the heavy lifting.
   STREAMED DATASET(t_Tensor) extract(STREAMED DATASET(t_Tensor) tens,
-            UNSIGNED pos, UNSIGNED datcount, nodeid, maxslice) := EMBED(Python: activity)
+            UNSIGNED pos, UNSIGNED datcount, nodeid, nNodes, maxslice) := EMBED(Python: activity)
     import numpy as np
     import traceback as tb
     maxSliceLen = maxslice
@@ -40,7 +41,7 @@ EXPORT DATASET(t_Tensor) TensExtract(DATASET(t_Tensor) tens, UNSIGNED pos,
       finalShape = [0] + origShape[1:]
       flatA = a.reshape(-1)
       flatSize = flatA.shape[0]
-      sliceId = 1
+      sliceId = nodeid + 1
       indx = 0
       maxSliceSize = 0
       datType = dTypeDictR[str(a.dtype)]
@@ -52,8 +53,9 @@ EXPORT DATASET(t_Tensor) TensExtract(DATASET(t_Tensor) tens, UNSIGNED pos,
           sliceSize = max_slice
         else:
           sliceSize = remaining
-        if sliceId == 1:
-          maxSliceSize = sliceSize
+        #if sliceId == 1:
+        #  maxSliceSize = sliceSize
+        maxSliceSize = sliceSize
         dat = list(flatA[indx:indx + sliceSize])
         dat = [float(d) for d in dat]
         elemCount = 0
@@ -178,5 +180,5 @@ EXPORT DATASET(t_Tensor) TensExtract(DATASET(t_Tensor) tens, UNSIGNED pos,
       # END OF getResults()
     return getResults()
   ENDEMBED; // Extract
-  RETURN SORT(extract(tens, pos-1, datcount, nodeId, MAX_SLICE), wi, sliceId, LOCAL);
+  RETURN SORT(extract(tens, pos-1, datcount, nodeId, nNodes, MAX_SLICE), wi, sliceId, LOCAL);
 END;

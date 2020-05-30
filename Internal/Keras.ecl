@@ -239,7 +239,7 @@ EXPORT Keras := MODULE
     threadlock = threading.Lock()
     threadlock.acquire()
     try:
-      initGlobals()
+      mc = modcache
     except:
       # modcache doesn't exist.  Do the initialization.
       try:
@@ -312,8 +312,6 @@ EXPORT Keras := MODULE
     except:
       # We had an error.  Format the exception and return it in the kString
       return [(nodeId, 1, kStrTypeDict['status'], format_exc('DefineMod'))]
-    finally:
-      threadlock.release()
   ENDEMBED; // DefineModel
   /** Function to Define a Functional (i.e. Non-Sequential) model and (optionally)
     * compile the model.
@@ -510,10 +508,10 @@ EXPORT Keras := MODULE
       mod = modcache[modelid]
       w = Tens2NpList(tens)
       with tfSession.as_default():
-        mod.set_weights(w)
-      outStr = ''
+        with tfSession.graph.as_default():
+          mod.set_weights(w)
       # Success.  Return an empty status string.
-      return [(nodeId, 1, 1, outStr)]
+      return [(nodeId, 1, 1, '')]
     except:
       # An error occurred.  Return a formatted exception string.
       return [(nodeId, 1,1,tb.format_exc('SetWeights')[-500:])]

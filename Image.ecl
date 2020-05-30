@@ -100,9 +100,8 @@ EXPORT Image := MODULE
                                   SELF.image := LEFT.contents[((COUNTER-1)*imgSize+1) .. (COUNTER*imgSize)],
                                   SELF.id := COUNTER,
                                   SELF.imgDims := [numRows, numCols, 1]));
-
-      outRecs := DISTRIBUTE(mnistOut,id); 
-      RETURN outRecs;                            
+ 
+      RETURN mnistOut;                            
     END;
 
     /** This function converts a compressed unsigned byte file, MNIST test images into a record for suitable input
@@ -134,8 +133,7 @@ EXPORT Image := MODULE
                                   SELF.id := COUNTER,
                                   SELF.imgDims := [numRows, numCols, 1]));
 
-      outRecs := DISTRIBUTE(mnistOut,id); 
-      RETURN outRecs;                            
+      RETURN mnistOut;                            
     END;
 
     /** This function converts a compressed unsigned byte file, MNIST train labels into a record for suitable input
@@ -161,8 +159,7 @@ EXPORT Image := MODULE
                                           SELF.label := (>UNSIGNED1<)LEFT.contents[COUNTER],
                                           SELF.id := COUNTER;));
 
-      outRecs := DISTRIBUTE(mnistOut,id);
-      RETURN outRecs;
+      RETURN mnistOut;
     END;
 
     /** This function converts a compressed unsigned byte file, MNIST test labels into a record for suitable input
@@ -188,8 +185,7 @@ EXPORT Image := MODULE
                                           SELF.label := (>UNSIGNED1<)LEFT.contents[COUNTER],
                                           SELF.id := COUNTER;));
 
-      outRecs := DISTRIBUTE(mnistOut,id);
-      RETURN outRecs;
+      RETURN mnistOut;
     END;
   END;  //END of mnist module
 
