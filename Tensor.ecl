@@ -586,7 +586,8 @@ EXPORT Tensor
       slicesPerNode := nSlices / nNodes;
       relNode := (sliceId - 1) div slicesPerNode;
       // Offset per wi so that differnt work items use staggered node numbering
-      nodeId := (wi - 1) + relNode % nNodes;
+      //nodeId := (wi - 1) + relNode % nNodes;
+      nodeId := relNode % nNodes; // Temporarily disable spreading by wi
       return nodeId;
     END;
     /**
@@ -604,7 +605,8 @@ EXPORT Tensor
     SHARED UNSIGNED4 calcNodeId2(UNSIGNED4 wi, UNSIGNED4 nSlices, UNSIGNED4 sliceSize, UNSIGNED recNum, UNSIGNED4 recSize) := FUNCTION
       sliceIdZ :=((recNum -1) * recSize) DIV sliceSize; // Zero based
       relNode := sliceIdZ DIV (nSlices / nNodes);
-      nodeId := (wi - 1) + relNode % nNodes;
+      //nodeId := (wi - 1) + relNode % nNodes;
+      nodeId := relNode % nNodes; // Temporarily disable spreading by wi
       RETURN nodeId;
     END;
 
@@ -922,8 +924,8 @@ EXPORT Tensor
                                     SELF.recSize := recSize(LEFT.shape),
                                     SELF.recsPerSlice := LEFT.maxSliceSize / SELF.recSize,
                                     SELF := LEFT), LOCAL);
-      itemInfo := SORT(itemInfo1, recsPerSlice);
-      largestRecItem := DEDUP(itemInfo, wi)[1];
+      itemInfo := SORT(itemInfo1, recsPerSlice, -recSize);
+      largestRecItem := itemInfo[1];
       newRecSize := largestRecItem.recSize;
       newRecsPerSlice := largestRecItem.recsPerSlice;
       largestRecWI := largestRecItem.wi;
@@ -946,7 +948,7 @@ EXPORT Tensor
         return outTens;
       END;
       reAligned := LOOP(tensList, numTensors, LEFT.wi >= COUNTER, adjustTensors(ROWS(LEFT), COUNTER));
-      RETURN reAligned;
+      RETURN SORT(reAligned, sliceId, LOCAL);
     END; // AlignTensors
   END; // R4
 END; // t_Tensor
